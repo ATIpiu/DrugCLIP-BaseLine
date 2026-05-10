@@ -8,6 +8,7 @@ from .utils import (
     compute_edge_types,
     add_bos_eos,
     crop_pocket,
+    load_atom_dict,
     ATOM_LIST,
     ATOM_TO_IDX,
     NUM_ATOM_TYPES,

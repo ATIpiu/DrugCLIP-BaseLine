@@ -8,6 +8,28 @@ from ..config import EncoderConfig, ATOM_DICT
 from .transformer import TransformerEncoderWithPair, LayerNorm
 
 
+class NonLinearHead(nn.Module):
+    """Two-layer MLP matching original DrugCLIP/unimol NonLinearHead.
+
+    Structure: Linear(input_dim→input_dim) → activation → Linear(input_dim→output_dim)
+    State-dict keys: linear1.weight/bias, linear2.weight/bias
+    """
+
+    def __init__(self, input_dim: int, output_dim: int, activation: str = "relu"):
+        super().__init__()
+        self.linear1 = nn.Linear(input_dim, input_dim)
+        self.linear2 = nn.Linear(input_dim, output_dim)
+        if activation == "relu":
+            self.activation = nn.ReLU()
+        elif activation == "gelu":
+            self.activation = nn.GELU()
+        else:
+            self.activation = nn.Tanh()
+
+    def forward(self, x):
+        return self.linear2(self.activation(self.linear1(x)))
+
+
 @torch.jit.script
 def gaussian(x, mean, std):
     pi = 3.14159
@@ -46,7 +68,8 @@ class UniMolEncoder(nn.Module):
     Takes atom type indices + 3D coordinates, outputs per-atom representations.
     """
 
-    def __init__(self, config: EncoderConfig, num_atom_types: int, gbf_k: int = 128):
+    def __init__(self, config: EncoderConfig, num_atom_types: int, gbf_k: int = 128,
+                 activation_fn: str = "gelu"):
         super().__init__()
         self.padding_idx = num_atom_types - 4  # [PAD] is 4th from end
         self.embed_tokens = nn.Embedding(
@@ -67,7 +90,8 @@ class UniMolEncoder(nn.Module):
 
         num_edge_types = num_atom_types * num_atom_types
         self.gbf = GaussianLayer(gbf_k, num_edge_types)
-        self.gbf_proj = nn.Linear(gbf_k, config.encoder_attention_heads)
+        # NonLinearHead matches original DrugCLIP checkpoint
+        self.gbf_proj = NonLinearHead(gbf_k, config.encoder_attention_heads, activation_fn)
 
     def forward(self, tokens, distances, edge_types):
         """Forward pass.

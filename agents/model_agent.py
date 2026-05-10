@@ -242,6 +242,11 @@ class ModelAgent(BaseAgent):
                         "usage": f"config.model.model_name = '{self._current_name}'",
                         "experience": "; ".join(experience),
                     },
+                    "decisions": [{
+                        "hypothesis": f"New architecture: {self._current_name}",
+                        "action": {"model_name": self._current_name},
+                        "rationale": "; ".join(experience) if experience else f"Model '{self._current_name}' generated and tested",
+                    }],
                     "summary": f"Model '{self._current_name}' created, tested, registered.",
                 }
 

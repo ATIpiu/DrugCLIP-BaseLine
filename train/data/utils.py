@@ -35,6 +35,24 @@ BOS_IDX = ATOM_TO_IDX["[BOS]"]
 EOS_IDX = ATOM_TO_IDX["[EOS]"]
 
 
+def load_atom_dict(path: str) -> dict:
+    """Load an atom dictionary from a text file (one atom type per line).
+
+    Returns a dict with keys: atom_to_idx, pad_idx, bos_idx, eos_idx, num_types.
+    Matches the unicore dictionary format used by original DrugCLIP.
+    """
+    with open(path, encoding="utf-8") as f:
+        atoms = [line.strip() for line in f if line.strip()]
+    atom_to_idx = {a: i for i, a in enumerate(atoms)}
+    return {
+        "atom_to_idx": atom_to_idx,
+        "pad_idx": atom_to_idx.get("[PAD]", 0),
+        "bos_idx": atom_to_idx.get("[CLS]", atom_to_idx.get("[BOS]", 1)),
+        "eos_idx": atom_to_idx.get("[SEP]", atom_to_idx.get("[EOS]", 2)),
+        "num_types": len(atoms),
+    }
+
+
 def element_to_atom_idx(element: str) -> int:
     """Map element symbol to atom type index (capitalize first)."""
     e = element.capitalize()
@@ -91,8 +109,17 @@ def smiles_to_conformer(
 
 # ── Atom Tokenization ─────────────────────────────────────────────
 
-def tokenize_atoms(elements: List[str]) -> np.ndarray:
-    """Convert element symbols to atom type indices."""
+def tokenize_atoms(elements: List[str], atom_dict: dict = None) -> np.ndarray:
+    """Convert element symbols to atom type indices.
+
+    Args:
+        elements: list of element symbols
+        atom_dict: optional custom dict from load_atom_dict()
+    """
+    if atom_dict is not None:
+        a2i = atom_dict["atom_to_idx"]
+        default = a2i.get("C", 4)
+        return np.array([a2i.get(e.capitalize(), default) for e in elements], dtype=np.int64)
     return np.array([element_to_atom_idx(e) for e in elements], dtype=np.int64)
 
 
@@ -110,29 +137,40 @@ def compute_distances(coords: np.ndarray) -> np.ndarray:
     return np.sqrt((diff ** 2).sum(axis=-1) + 1e-8).astype(np.float32)
 
 
-def compute_edge_types(tokens: np.ndarray, num_types: int) -> np.ndarray:
+def compute_edge_types(tokens: np.ndarray, num_types: int = None,
+                       atom_dict: dict = None) -> np.ndarray:
     """Pair-wise edge type indices.
 
     Args:
         tokens: (N,) int array of atom type indices
         num_types: total number of atom types
+        atom_dict: optional custom dict from load_atom_dict()
     Returns:
         (N, N) int64 edge type matrix (src_idx * num_types + dst_idx)
     """
+    if atom_dict is not None:
+        num_types = atom_dict["num_types"]
     return (tokens[:, None] * num_types + tokens[None, :]).astype(np.int64)
 
 
 # ── Prepend/Append BOS/EOS tokens ─────────────────────────────────
 
 def add_bos_eos(
-    tokens: np.ndarray, coords: np.ndarray, zero_coord: float = 0.0
+    tokens: np.ndarray, coords: np.ndarray, zero_coord: float = 0.0,
+    atom_dict: dict = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """Add BOS at start and EOS at end."""
+    """Add BOS at start and EOS at end.
+
+    Args:
+        atom_dict: optional custom dict from load_atom_dict() for BOS/EOS indices
+    """
+    bos = atom_dict["bos_idx"] if atom_dict else BOS_IDX
+    eos = atom_dict["eos_idx"] if atom_dict else EOS_IDX
     N = len(tokens)
     new_tokens = np.zeros(N + 2, dtype=np.int64)
-    new_tokens[0] = BOS_IDX
+    new_tokens[0] = bos
     new_tokens[1:-1] = tokens
-    new_tokens[-1] = EOS_IDX
+    new_tokens[-1] = eos
 
     new_coords = np.zeros((N + 2, 3), dtype=np.float32)
     new_coords[1:-1] = coords
@@ -156,7 +194,8 @@ def crop_pocket(
 # ── Full molecule preparation pipeline ────────────────────────────
 
 def prepare_molecule(
-    smiles: str, max_atoms: Optional[int] = None, fast: bool = False
+    smiles: str, max_atoms: Optional[int] = None, fast: bool = False,
+    atom_dict: dict = None,
 ) -> Optional[dict]:
     """SMILES → tokenized atoms + distances + edge_types.
 
@@ -164,6 +203,7 @@ def prepare_molecule(
         smiles: input SMILES string
         max_atoms: optional max atom count
         fast: if True, skip MMFF optimization (much faster, good for inference)
+        atom_dict: optional custom dict from load_atom_dict()
 
     Returns dict with keys: tokens, distances, edge_types, coords (all numpy)
     or None on failure.
@@ -173,11 +213,11 @@ def prepare_molecule(
         return None
     elements, coords = result
 
-    tokens = tokenize_atoms(elements)
-    tokens, coords = add_bos_eos(tokens, coords)
+    tokens = tokenize_atoms(elements, atom_dict)
+    tokens, coords = add_bos_eos(tokens, coords, atom_dict=atom_dict)
 
     distances = compute_distances(coords)
-    edge_types = compute_edge_types(tokens, NUM_ATOM_TYPES)
+    edge_types = compute_edge_types(tokens, atom_dict=atom_dict)
 
     return {
         "tokens": tokens,
@@ -193,18 +233,22 @@ def prepare_pocket(
     coords: np.ndarray,
     elements: List[str],
     max_atoms: int = 256,
+    atom_dict: dict = None,
 ) -> dict:
     """Pocket atoms → tokenized + distances + edge_types.
+
+    Args:
+        atom_dict: optional custom dict from load_atom_dict()
 
     Returns dict with keys: tokens, distances, edge_types, coords (all numpy).
     """
     elements, coords = crop_pocket(elements, coords, max_atoms)
 
-    tokens = tokenize_atoms(elements)
-    tokens, coords = add_bos_eos(tokens, coords)
+    tokens = tokenize_atoms(elements, atom_dict)
+    tokens, coords = add_bos_eos(tokens, coords, atom_dict=atom_dict)
 
     distances = compute_distances(coords)
-    edge_types = compute_edge_types(tokens, NUM_ATOM_TYPES)
+    edge_types = compute_edge_types(tokens, atom_dict=atom_dict)
 
     return {
         "tokens": tokens,

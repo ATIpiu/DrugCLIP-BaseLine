@@ -50,6 +50,7 @@ TUNING_SYSTEM_PROMPT = """你是 DrugCLIP 模型的超参数调优专家。
 绝对不要在这种情况下增加模型容量（层数/维度）！更多参数会让坍塌更严重。
 
 ## 参数合理范围
+### 全量训练（无预训练）
 - train.lr: 1e-5 ~ 3e-4
 - train.batch_size: 16 ~ 64
 - model.*.encoder_layers: 2 ~ 8 (不要超过8)
@@ -57,22 +58,43 @@ TUNING_SYSTEM_PROMPT = """你是 DrugCLIP 模型的超参数调优专家。
 - model.temperature: 0.05 ~ 0.5 (越低越容易坍塌)
 - model.*.dropout: 0.1 ~ 0.5
 
-## 任务
+### 微调模式（model.pretrained_path 不为空时）
+- train.new_lr: 1e-6 ~ 1e-4 (比全量训练低一个量级)
+- train.freeze_encoder_layers: 逗号分隔的层索引 "0,1,2,..." (字符串) 或空字符串 ""
+- train.freeze_embeddings: true/false (通常建议 true)
+- train.freeze_gbf: true/false (通常建议 true)
+- train.freeze_project: true/false (通常建议 false，让 projection 适配新数据)
+- train.epochs: 10 ~ 50 (微调通常更少轮数)
+- 冻结策略：冻结前 N 层保留预训练特征，解冻后几层 + projection 适配新数据
 
 ## 你可调整的参数
+### 训练参数
 - train.lr: 学习率 (如 3e-4, 1e-4, 5e-5)
+- train.new_lr: 微调学习率 (如 1e-4, 5e-5, 1e-5)
 - train.batch_size: 批次大小 (如 32, 64, 128)
 - train.weight_decay: 权重衰减 (如 1e-5, 1e-4, 1e-3)
 - train.warmup_epochs: 预热轮数 (如 3, 5, 10)
+- train.epochs: 训练总轮数 (如 20, 30, 50)
+
+### 模型架构参数
 - model.mol.encoder_layers: 分子编码器层数 (2-15)
 - model.mol.encoder_embed_dim: 分子编码器维度 (128-768)
 - model.mol.encoder_attention_heads: 分子编码器注意力头数 (需整除 embed_dim)
 - model.mol.dropout: 分子编码器 dropout (0.0-0.3)
-- model.pocket.encoder_layers: 口袋编码器层数
-- model.pocket.encoder_embed_dim: 口袋编码器维度
+- model.pocket.encoder_layers: 口袋编码器层数 (2-15)
+- model.pocket.encoder_embed_dim: 口袋编码器维度 (128-768)
 - model.pocket.encoder_attention_heads: 口袋编码器注意力头数
-- model.pocket.dropout: 口袋编码器 dropout
+- model.pocket.dropout: 口袋编码器 dropout (0.0-0.3)
 - model.temperature: 对比学习温度 (0.02-0.2)
+
+### 冻结参数（微调模式）
+- train.freeze_encoder_layers: 冻结的层索引字符串 "0,1,2,...14" (空字符串=全解冻)
+- train.freeze_embeddings: 是否冻结 token embedding (true/false)
+- train.freeze_gbf: 是否冻结 GBF 层 (true/false)
+- train.freeze_project: 是否冻结 projection head (true/false)
+
+### 预训练参数
+- model.pretrained_path: 预训练 checkpoint 路径 (设为 "train/model/Base/checkpoint_best.pt" 启用微调)
 
 ## 调参策略
 1. 如果 loss 在上升 → 减小学习率
@@ -82,6 +104,8 @@ TUNING_SYSTEM_PROMPT = """你是 DrugCLIP 模型的超参数调优专家。
 5. 如果 train loss 远低于 val loss (过拟合) → 增大 dropout + weight_decay
 6. 如果 badcase 中大多数是"small ligand"问题 → 考虑调整温度
 7. 每次只修改 1-3 个参数，便于追踪效果
+8. **微调模式**：如果 EF1/AUROC 不收敛 → 解冻更多层（减少 freeze_encoder_layers 中的层数）
+9. **微调模式**：如果过拟合 → 减小 new_lr、增加 freeze_encoder_layers
 
 ## 输出格式
 你必须只输出一个 JSON 对象，不要输出任何其他内容：
@@ -303,6 +327,15 @@ class TuningAgent(BaseAgent):
 
         self.log and self.log.agent_result("TuningAgent", {"status": "ok", "summary": summary})
 
+        # Format decisions for main_agent logging
+        decisions = []
+        for imp in iterations:
+            decisions.append({
+                "hypothesis": imp.get("hypothesis", ""),
+                "action": imp.get("changes", {}),
+                "rationale": f"AUROC {imp.get('current_auroc', 0):.4f} (Δ{imp.get('auroc_delta', 0):+.4f})",
+            })
+
         return {
             "status": "ok",
             "data": {
@@ -312,6 +345,7 @@ class TuningAgent(BaseAgent):
                 "improvement": final_improvement,
                 "best_config_updates": best_config,
             },
+            "decisions": decisions,
             "summary": summary,
         }
 
@@ -346,9 +380,11 @@ class TuningAgent(BaseAgent):
                 badcase_info += f"  - {b.get('hypothesis', '?')}\n"
 
         current_config = {
-            "train": {"lr": config.train.lr, "batch_size": config.train.batch_size,
+            "train": {"lr": config.train.lr, "new_lr": config.train.new_lr,
+                       "batch_size": config.train.batch_size,
                        "weight_decay": config.train.weight_decay,
-                       "warmup_epochs": config.train.warmup_epochs},
+                       "warmup_epochs": config.train.warmup_epochs,
+                       "epochs": config.train.epochs},
             "mol": {"layers": config.model.mol.encoder_layers,
                      "dim": config.model.mol.encoder_embed_dim,
                      "heads": config.model.mol.encoder_attention_heads,
@@ -358,6 +394,13 @@ class TuningAgent(BaseAgent):
                         "heads": config.model.pocket.encoder_attention_heads,
                         "dropout": config.model.pocket.dropout},
             "temperature": config.model.temperature,
+            "freeze": {
+                "encoder_layers": config.train.freeze_encoder_layers,
+                "embeddings": config.train.freeze_embeddings,
+                "gbf": config.train.freeze_gbf,
+                "project": config.train.freeze_project,
+            },
+            "pretrained": config.model.pretrained_path or "无",
         }
 
         prompt = f"""## 当前训练状态
@@ -433,7 +476,21 @@ Top-5: {metrics.get('top5', 'N/A')}
         for part in parts[:-1]:
             obj = getattr(obj, part)
         current = getattr(obj, parts[-1])
-        if isinstance(current, int):
+        if isinstance(current, list):
+            # Handle list: can be comma-separated string or actual list
+            if isinstance(value, str):
+                if value.strip():
+                    new_val = [int(x.strip()) for x in value.split(",") if x.strip()]
+                else:
+                    new_val = []
+            elif isinstance(value, list):
+                new_val = [int(x) for x in value]
+            else:
+                new_val = []
+            setattr(obj, parts[-1], new_val)
+        elif isinstance(current, bool):
+            setattr(obj, parts[-1], bool(value) if not isinstance(value, bool) else value)
+        elif isinstance(current, int):
             setattr(obj, parts[-1], int(float(value)))
         elif isinstance(current, float):
             setattr(obj, parts[-1], float(value))
@@ -451,35 +508,52 @@ Top-5: {metrics.get('top5', 'N/A')}
         issues = []
         default_params = {}
 
-        # Check for common issues
-        if t.lr >= 3e-4:
-            issues.append("学习率偏高，建议降低")
-            default_params["train.lr"] = 1e-4
-        if t.epochs < 30:
-            issues.append("训练轮数较少，建议增加到 30-50")
-            default_params["train.epochs"] = 30
+        is_finetune = bool(m.pretrained_path)
 
-        if m.mol.encoder_layers < 4:
-            issues.append("模型层数较少（<4），可能欠拟合")
-            default_params["model.mol.encoder_layers"] = 4
-            default_params["model.pocket.encoder_layers"] = 4
+        if is_finetune:
+            # Fine-tuning mode recommendations
+            if t.new_lr is None and t.lr >= 3e-4:
+                issues.append("微调模式建议使用较低学习率")
+                default_params["train.new_lr"] = 1e-4
+            if not t.freeze_encoder_layers and not t.freeze_embeddings:
+                issues.append("微调模式未设置冻结层，可能导致灾难性遗忘")
+                default_params["train.freeze_encoder_layers"] = "0,1,2,3,4,5,6,7,8,9,10,11"
+                default_params["train.freeze_embeddings"] = True
+                default_params["train.freeze_gbf"] = True
+            if t.epochs < 15:
+                issues.append("微调轮数较少，建议 15-30")
+                default_params["train.epochs"] = 20
+        else:
+            # Full training mode recommendations
+            if t.lr >= 3e-4:
+                issues.append("学习率偏高，建议降低")
+                default_params["train.lr"] = 1e-4
+            if t.epochs < 30:
+                issues.append("训练轮数较少，建议增加到 30-50")
+                default_params["train.epochs"] = 30
+            if m.mol.encoder_layers < 4:
+                issues.append("模型层数较少（<4），可能欠拟合")
+                default_params["model.mol.encoder_layers"] = 4
+                default_params["model.pocket.encoder_layers"] = 4
+            if m.mol.dropout < 0.1:
+                issues.append("dropout 较低，有 overfitting 风险")
+                default_params["model.mol.dropout"] = 0.2
+            if m.temperature < 0.05:
+                issues.append("温度过低可能导致梯度消失")
+                default_params["model.temperature"] = 0.07
+            if t.batch_size <= 16:
+                issues.append("batch_size 较小，loss 可能不稳定")
+                default_params["train.batch_size"] = 32
 
-        if m.mol.dropout < 0.1:
-            issues.append("dropout 较低，有 overfitting 风险")
-            default_params["model.mol.dropout"] = 0.2
-
-        if m.temperature < 0.05:
-            issues.append("温度过低可能导致梯度消失")
-            default_params["model.temperature"] = 0.07
-
-        if t.batch_size <= 16:
-            issues.append("batch_size 较小，loss 可能不稳定")
-            default_params["train.batch_size"] = 32
+        scope = "学习率、冻结策略、模型容量、dropout、温度、batch_size" if is_finetune else \
+                "学习率、模型容量、dropout、温度、batch_size"
 
         return {
             "model_name": config.model.model_name,
+            "is_finetune": is_finetune,
+            "pretrained_path": m.pretrained_path or "无",
             "default_params": default_params,
-            "tuning_scope": "学习率、模型容量、dropout、温度、batch_size",
+            "tuning_scope": scope,
             "expected_outcome": f"经过 {num_iterations} 轮调参后 AUROC 预期提升 0.03-0.10",
             "risks": "每轮调参需重新训练，耗时较长；若 baseline 已很好则提升空间有限",
             "issues_found": issues,
@@ -501,10 +575,18 @@ Top-5: {metrics.get('top5', 'N/A')}
 
     @staticmethod
     def _config_snapshot(config) -> dict:
-        return {
+        snap = {
             "train.lr": config.train.lr,
+            "train.new_lr": config.train.new_lr,
             "train.batch_size": config.train.batch_size,
+            "train.epochs": config.train.epochs,
             "train.weight_decay": config.train.weight_decay,
+            "train.warmup_epochs": config.train.warmup_epochs,
+            "train.freeze_encoder_layers": config.train.freeze_encoder_layers,
+            "train.freeze_embeddings": config.train.freeze_embeddings,
+            "train.freeze_gbf": config.train.freeze_gbf,
+            "train.freeze_project": config.train.freeze_project,
+            "model.pretrained_path": config.model.pretrained_path,
             "model.mol.encoder_layers": config.model.mol.encoder_layers,
             "model.mol.encoder_embed_dim": config.model.mol.encoder_embed_dim,
             "model.mol.encoder_attention_heads": config.model.mol.encoder_attention_heads,
@@ -514,4 +596,8 @@ Top-5: {metrics.get('top5', 'N/A')}
             "model.pocket.encoder_attention_heads": config.model.pocket.encoder_attention_heads,
             "model.pocket.dropout": config.model.pocket.dropout,
             "model.temperature": config.model.temperature,
+            "model.mol_atom_types": config.model.mol_atom_types,
+            "model.pocket_atom_types": config.model.pocket_atom_types,
+            "model.use_bos_pool": config.model.use_bos_pool,
         }
+        return {k: v for k, v in snap.items() if v is not None}  # filter None values

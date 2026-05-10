@@ -327,10 +327,71 @@ class OdysseyLogger:
             self._kv("References", str(decision["reference_docs"]))
 
     def log_tool_result(self, tool_name: str, result: dict):
-        pass  # Handled by iteration methods above
+        """Log tool execution result with relevant metrics."""
+        if result.get("status") != "ok":
+            self._write(f"  [{tool_name}] FAILED: {result.get('summary', result.get('error', 'unknown'))}")
+            return
+
+        data = result.get("data", {})
+        summary = result.get("summary", "")
+
+        if tool_name == "train_tool":
+            self._write(f"  [{tool_name}] {summary}")
+            if data.get("per_epoch_metrics"):
+                m = data["per_epoch_metrics"]
+                first, last = m[0], m[-1]
+                self._kv("Train Loss", f"{first['train_loss']:.4f} → {last['train_loss']:.4f}", 4)
+                if "val_ef1" in last:
+                    self._kv("Val EF1", f"{first.get('val_ef1', 0):.3f} → {last['val_ef1']:.3f}", 4)
+                    self._kv("Val AUROC", f"{first.get('val_auroc', 0):.3f} → {last['val_auroc']:.3f}", 4)
+                    self._kv("Val MRR", f"{first.get('val_mrr', 0):.3f} → {last['val_mrr']:.3f}", 4)
+        elif tool_name == "eval_tool":
+            m = data.get("overall_metrics", {})
+            self._write(f"  [{tool_name}] AUROC={m.get('auroc', 0):.4f}  EF1%={m.get('ef1', 0):.1f}  "
+                        f"EF5%={m.get('ef5', 0):.1f}  MRR={m.get('mrr', 0):.4f}  "
+                        f"Top-1={m.get('top1', 0):.3f}  Top-5={m.get('top5', 0):.3f}")
+            bc = data.get("badcase_analysis", {})
+            if bc.get("badcases"):
+                self._kv("Badcases", f"{len(bc['badcases'])} samples with low AUROC", 4)
+        elif tool_name == "loss_tool":
+            d = data
+            self._write(f"  [{tool_name}] {summary}")
+            if d.get("trend"):
+                self._kv("Trend", d["trend"], 4)
+            if d.get("suggestions"):
+                for s in d["suggestions"][:3]:
+                    self._kv("Suggestion", s, 4)
+        elif tool_name == "DataAgent":
+            self._write(f"  [{tool_name}] {summary}")
+        elif tool_name == "BenchmarkAgent":
+            self._write(f"  [{tool_name}] {summary}")
+            if data.get("submission_path"):
+                self._kv("Submission", data["submission_path"], 4)
+            if data.get("total_tasks"):
+                self._kv("Tasks", data["total_tasks"], 4)
+        else:
+            self._write(f"  [{tool_name}] {summary}")
 
     def log_iteration_boundary(self, iteration: int):
         self._section(f"Iteration {iteration}")
+
+    def log_iteration_detail(self, iteration: int, hypothesis: str, changes: dict,
+                             baseline_metrics: dict = None, current_metrics: dict = None):
+        """Log a complete optimization iteration with before/after comparison."""
+        self._section(f"Optimization Iteration {iteration}")
+        if hypothesis:
+            self._kv("Hypothesis", hypothesis)
+        if changes:
+            self._write("  Changes:")
+            for k, v in changes.items():
+                self._kv(k, v, 4)
+        if baseline_metrics and current_metrics:
+            self._write("  Result:")
+            for key in ["auroc", "ef1", "mrr"]:
+                b = baseline_metrics.get(key, 0)
+                c = current_metrics.get(key, 0)
+                delta = c - b
+                self._kv(f"Δ {key.upper()}", f"{b:.4f} → {c:.4f} ({delta:+.4f})", 4)
 
     def log_inference_progress(self, task_id: str, num_ligands: int, elapsed: float):
         self._write(f"  {task_id}: {num_ligands} ligands, {elapsed:.1f}s")

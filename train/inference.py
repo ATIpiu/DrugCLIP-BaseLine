@@ -27,7 +27,6 @@ from .data import (
 
 # Fast inference: skip MMFF optimization for speed
 from functools import partial as _partial
-_prepare_mol_fast = _partial(prepare_molecule, fast=True)
 from .data.dataset import collate_mol_fn
 from .logger import OdysseyLogger
 
@@ -59,21 +58,55 @@ class InferenceEngine:
 
     def _load_checkpoint(self, path: str):
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
-        # Try loading config from model directory
+        # Load full model config from config.json
         import json
-        config_dir = Path(path).parent.parent  # .../models/<name>/checkpoints/best.pt → .../models/<name>/
+        config_dir = Path(path).parent.parent
         config_json = config_dir / "config.json"
         if config_json.exists():
             with open(config_json, encoding="utf-8") as f:
                 config_dict = json.load(f)
-            from dataclasses import asdict
-            self.config.model.mol.encoder_layers = config_dict.get("mol", {}).get("encoder_layers", 8)
-            self.config.model.mol.encoder_embed_dim = config_dict.get("mol", {}).get("encoder_embed_dim", 384)
-            self.config.model.pocket.encoder_layers = config_dict.get("pocket", {}).get("encoder_layers", 8)
-            self.config.model.pocket.encoder_embed_dim = config_dict.get("pocket", {}).get("encoder_embed_dim", 384)
-            self.config.model.project_dim = config_dict.get("project_dim", 128)
+            # config_dict is nested: {"model": {...}, "train": {...}, ...}
+            model_cfg = config_dict.get("model", config_dict)
+            mol_cfg = model_cfg.get("mol", {})
+            pocket_cfg = model_cfg.get("pocket", {})
+
+            # Apply all encoder arch fields
+            for prefix, enc, src in [("mol", self.config.model.mol, mol_cfg),
+                                      ("pocket", self.config.model.pocket, pocket_cfg)]:
+                for key in ["encoder_layers", "encoder_embed_dim", "encoder_ffn_embed_dim",
+                           "encoder_attention_heads", "dropout", "emb_dropout",
+                           "attention_dropout", "activation_dropout", "activation_fn"]:
+                    if key in src:
+                        setattr(enc, key, src[key])
+
+            # Apply model-level fields
+            for key in ["project_dim", "gbf_k", "temperature", "mol_atom_types",
+                       "pocket_atom_types", "use_bos_pool", "max_pocket_atoms",
+                       "dist_threshold", "model_name"]:
+                if key in model_cfg:
+                    setattr(self.config.model, key, model_cfg[key])
+
             del self.model
             self.model = DrugCLIP(self.config.model).to(self.device)
+
+            # Load atom dicts for inference data pipeline if pretrained
+            if model_cfg.get("pretrained_path"):
+                from pathlib import Path as _Path
+                ref_data = _Path(__file__).resolve().parent.parent / "ref" / "DrugCLIP-main" / "DrugCLIP-main" / "data"
+                mol_dict_file = ref_data / "dict_mol.txt"
+                pocket_dict_file = ref_data / "dict_pkt.txt"
+                if mol_dict_file.exists() and pocket_dict_file.exists():
+                    from .data.utils import load_atom_dict
+                    self._mol_atom_dict = load_atom_dict(str(mol_dict_file))
+                    self._pocket_atom_dict = load_atom_dict(str(pocket_dict_file))
+                    self.logger.log(f"Atom dicts loaded for inference")
+                else:
+                    self._mol_atom_dict = None
+                    self._pocket_atom_dict = None
+            else:
+                self._mol_atom_dict = None
+                self._pocket_atom_dict = None
+
         self.model.load_state_dict(ckpt["model_state_dict"], strict=False)
         self.logger.log(f"Loaded checkpoint: {path} (epoch {ckpt['epoch']})")
 
@@ -154,7 +187,8 @@ class InferenceEngine:
 
                     pocket_data = prepare_pocket(
                         pocket_coords, pocket_elements,
-                        self.config.model.max_pocket_atoms
+                        self.config.model.max_pocket_atoms,
+                        atom_dict=self._pocket_atom_dict,
                     )
                     pb = {k: torch.from_numpy(pocket_data[k]).unsqueeze(0).to(self.device)
                           for k in ["tokens", "distances", "edge_types"]}
@@ -185,8 +219,10 @@ class InferenceEngine:
         if uncached:
             n_workers = min(os.cpu_count() or 4, 8)
             self.logger.log(f"  Preparing {len(uncached)} ligands ({n_workers} workers)...")
+            mol_atom_dict = self._mol_atom_dict  # capture for picklable partial
+            _mol_fn = _partial(prepare_molecule, fast=True, atom_dict=mol_atom_dict)
             with ProcessPoolExecutor(max_workers=n_workers) as pool:
-                futures = {pool.submit(_prepare_mol_fast, smi): (idx, smi)
+                futures = {pool.submit(_mol_fn, smi): (idx, smi)
                            for idx, smi in uncached}
                 for f in as_completed(futures):
                     idx, smi = futures[f]

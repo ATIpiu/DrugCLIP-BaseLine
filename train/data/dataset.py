@@ -40,12 +40,16 @@ class CachedPDBbindDataset(Dataset):
         split: str = "train",
         val_ratio: float = 0.1,
         seed: int = 42,
+        mol_atom_dict: dict = None,
+        pocket_atom_dict: dict = None,
         **kwargs,
     ):
         self.max_pocket_atoms = max_pocket_atoms
         self.split = split
         self.val_ratio = val_ratio
         self.seed = seed
+        self._mol_dict = mol_atom_dict
+        self._pocket_dict = pocket_atom_dict
 
         # Build file index — fast, no RDKit yet
         dirs = sorted([d for d in Path(data_dir).iterdir() if d.is_dir()])
@@ -84,14 +88,15 @@ class CachedPDBbindDataset(Dataset):
         if not _SILENT():
             print(f"  Loading {total} samples ({self.split})...", flush=True)
         for i, (pocket_pdb, smiles, pdb_id) in enumerate(file_list):
-            mol_result = prepare_molecule(smiles)
+            mol_result = prepare_molecule(smiles, atom_dict=mol_atom_dict)
             if mol_result is None:
                 continue
 
             coords, elements, _ = parse_pdb_atoms(pocket_pdb)
             if len(coords) == 0:
                 continue
-            pocket_result = prepare_pocket(coords, elements, max_pocket_atoms)
+            pocket_result = prepare_pocket(coords, elements, max_pocket_atoms,
+                                           atom_dict=pocket_atom_dict)
 
             self._mol_data.append(mol_result)
             self._pocket_data.append(pocket_result)
@@ -176,9 +181,12 @@ def collate_mol_fn(batch: list) -> dict:
     }
 
 
-def collate_fn(batch: list) -> dict:
+def collate_fn(batch: list, mol_pad: int = None, pocket_pad: int = None) -> dict:
     """Pad tokens and distances to max length in batch (mol + pocket)."""
     from .utils import PAD_IDX
+
+    mol_pad_idx = mol_pad if mol_pad is not None else PAD_IDX
+    pocket_pad_idx = pocket_pad if pocket_pad is not None else PAD_IDX
 
     mol_tokens = [b["mol_tokens"] for b in batch]
     pocket_tokens = [b["pocket_tokens"] for b in batch]
@@ -188,10 +196,10 @@ def collate_fn(batch: list) -> dict:
     pocket_et = [b["pocket_edge_types"] for b in batch]
 
     return {
-        "mol_tokens": _pad_1d(mol_tokens, PAD_IDX),
+        "mol_tokens": _pad_1d(mol_tokens, mol_pad_idx),
         "mol_distances": _pad_2d(mol_dist, 0.0),
         "mol_edge_types": _pad_2d(mol_et, 0),
-        "pocket_tokens": _pad_1d(pocket_tokens, PAD_IDX),
+        "pocket_tokens": _pad_1d(pocket_tokens, pocket_pad_idx),
         "pocket_distances": _pad_2d(pocket_dist, 0.0),
         "pocket_edge_types": _pad_2d(pocket_et, 0),
     }
@@ -226,6 +234,8 @@ def create_dataloader(
     val_ratio: float = 0.1,
     seed: int = 42,
     drop_last: bool = True,
+    mol_atom_dict: dict = None,
+    pocket_atom_dict: dict = None,
     **kwargs,
 ) -> DataLoader:
     dataset = CachedPDBbindDataset(
@@ -235,13 +245,23 @@ def create_dataloader(
         split=split,
         val_ratio=val_ratio,
         seed=seed,
+        mol_atom_dict=mol_atom_dict,
+        pocket_atom_dict=pocket_atom_dict,
     )
+    # Build collate_fn with custom pad indices if using custom atom dicts
+    from functools import partial
+    _collate = partial(
+        collate_fn,
+        mol_pad=mol_atom_dict["pad_idx"] if mol_atom_dict else None,
+        pocket_pad=pocket_atom_dict["pad_idx"] if pocket_atom_dict else None,
+    )
+
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        collate_fn=collate_fn,
+        collate_fn=_collate,
         pin_memory=True,
         drop_last=drop_last,
     )

@@ -137,9 +137,11 @@ class MainAgent(BaseAgent):
 
             # Tune
             tuning_result = TuningAgent().run(context)
+            tuning_decision = {}
             if tuning_result.get("decisions"):
                 for d in tuning_result["decisions"]:
                     self._log_agent("TuningAgent", d)
+                    tuning_decision = d
 
             # Train
             from train.tools.train_tool import train_tool
@@ -151,9 +153,18 @@ class MainAgent(BaseAgent):
             if train_result["status"] != "ok":
                 break
 
+            # Log per-epoch training metrics in detail
+            per_epoch = train_result["data"].get("per_epoch_metrics", [])
+            if per_epoch and self.logger:
+                first, last = per_epoch[0], per_epoch[-1]
+                self._log(f"  Training: {len(per_epoch)} epochs, "
+                          f"Loss {first['train_loss']:.4f}→{last['train_loss']:.4f}")
+                if "val_ef1" in last:
+                    self._log(f"  Val: EF1 {first.get('val_ef1',0):.3f}→{last['val_ef1']:.3f}  "
+                              f"AUROC {first.get('val_auroc',0):.3f}→{last['val_auroc']:.3f}")
+
             # Loss
             from train.tools.loss_tool import loss_tool
-            per_epoch = train_result["data"].get("per_epoch_metrics", [])
             loss_result = loss_tool(per_epoch)
             context["loss_data"] = loss_result
             self._log_tool("loss_tool", loss_result)
@@ -188,11 +199,33 @@ class MainAgent(BaseAgent):
         benchmark_result = BenchmarkAgent().run(context)
         self._log_tool("BenchmarkAgent", benchmark_result)
 
+        # Final trajectory summary
+        history = context.get("history", [])
+        if history and self.logger:
+            self._log("")
+            self._log("  ── Optimization Trajectory ──")
+            self._log(f"  {'Iter':<5} {'Best Loss':>10} {'Val AUROC':>10} {'Status':>12}")
+            self._log(f"  {'─'*5} {'─'*10} {'─'*10} {'─'*12}")
+            for h in history:
+                tr = h.get("train_result", {})
+                d = tr.get("data", {}) if tr.get("status") == "ok" else {}
+                per_epoch = d.get("per_epoch_metrics", [])
+                last = per_epoch[-1] if per_epoch else {}
+                loss = f"{d.get('best_loss', 0):.4f}"
+                auroc = f"{last.get('val_auroc', 0):.3f}" if "val_auroc" in last else "N/A"
+                status = "OK" if tr.get("status") == "ok" else "FAIL"
+                self._log(f"  {h['iteration']:<5} {loss:>10} {auroc:>10} {status:>12}")
+            self._log("")
+
         final = context["train_results"][-1] if context["train_results"] else {}
         self._log_section("Pipeline Complete")
         if final.get("status") == "ok":
-            self._log(f"Best loss: {final['data']['best_loss']:.4f}")
-        self._log(f"Submission: {benchmark_result.get('data', {}).get('submission_path', 'N/A')}")
+            d = final["data"]
+            self._log(f"  Best Loss: {d['best_loss']:.4f} (epoch {d.get('best_epoch', '?')})")
+            self._log(f"  Epochs trained: {d.get('epochs_trained', '?')}")
+        sub_path = benchmark_result.get('data', {}).get('submission_path', 'N/A')
+        self._log(f"  Submission: {sub_path}")
+        self._log(f"  Total iterations: {len(history)}")
 
         return {
             "status": "ok",

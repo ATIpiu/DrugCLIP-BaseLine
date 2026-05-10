@@ -47,6 +47,16 @@ class ModelConfig:
     max_pocket_atoms: int = 256
     dist_threshold: float = 6.0  # distance threshold for pocket extraction
 
+    # Pretrained checkpoint (unicore or odyssey format)
+    pretrained_path: Optional[str] = None
+
+    # Atom type counts (separate for mol/pocket, default from ATOM_DICT)
+    mol_atom_types: int = 24
+    pocket_atom_types: int = 24
+
+    # Use [BOS] token embedding for pooling (matches original DrugCLIP pretraining)
+    use_bos_pool: bool = False
+
 
 @dataclass
 class TrainConfig:
@@ -63,6 +73,15 @@ class TrainConfig:
     log_interval: int = 10
     save_interval: int = 10
     mixed_precision: bool = True
+
+    # Fine-tuning: layer freezing
+    freeze_encoder_layers: List[int] = field(default_factory=list)  # layer indices to freeze
+    freeze_embeddings: bool = False   # freeze token embedding tables
+    freeze_gbf: bool = False          # freeze GBF (means, stds, mul, bias)
+    freeze_project: bool = False      # freeze projection heads
+
+    # Fine-tuning: override learning rate (None = use lr)
+    new_lr: Optional[float] = None
 
 
 @dataclass

@@ -49,6 +49,27 @@ def parse_args():
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--max-samples", type=int, default=0,
                    help="Max samples to load (0 = all)")
+
+    # Fine-tuning / pretrained checkpoint
+    p.add_argument("--pretrained", default=None,
+                   help="Pretrained checkpoint path (unicore or odyssey format)")
+    p.add_argument("--freeze-encoder-layers", default="",
+                   help="Comma-separated encoder layer indices to freeze (0-indexed)")
+    p.add_argument("--freeze-embeddings", action="store_true",
+                   help="Freeze token embedding tables")
+    p.add_argument("--freeze-gbf", action="store_true",
+                   help="Freeze GBF layers (means, stds, mul, bias)")
+    p.add_argument("--freeze-project", action="store_true",
+                   help="Freeze projection heads")
+    p.add_argument("--new-lr", type=float, default=None,
+                   help="Learning rate for fine-tuning (overrides --lr for optimizer)")
+    p.add_argument("--mol-atom-types", type=int, default=None,
+                   help="Override mol atom type count (auto-detected from checkpoint)")
+    p.add_argument("--pocket-atom-types", type=int, default=None,
+                   help="Override pocket atom type count (auto-detected from checkpoint)")
+    p.add_argument("--no-bos-pool", action="store_true",
+                   help="Use mean pooling instead of [BOS] pooling for pretrained models")
+
     return p.parse_args()
 
 
@@ -67,6 +88,30 @@ def build_config(args) -> Config:
     config.model.mol.encoder_embed_dim = args.encoder_dim
     config.model.pocket.encoder_layers = args.encoder_layers
     config.model.pocket.encoder_embed_dim = args.encoder_dim
+
+    # Pretrained checkpoint
+    if args.pretrained:
+        config.model.pretrained_path = args.pretrained
+    if args.no_bos_pool:
+        config.model.use_bos_pool = False
+
+    # Layer freezing
+    if args.freeze_encoder_layers:
+        config.train.freeze_encoder_layers = [
+            int(x.strip()) for x in args.freeze_encoder_layers.split(",") if x.strip()
+        ]
+    config.train.freeze_embeddings = args.freeze_embeddings
+    config.train.freeze_gbf = args.freeze_gbf
+    config.train.freeze_project = args.freeze_project
+    if args.new_lr is not None:
+        config.train.new_lr = args.new_lr
+
+    # Atom type overrides
+    if args.mol_atom_types is not None:
+        config.model.mol_atom_types = args.mol_atom_types
+    if args.pocket_atom_types is not None:
+        config.model.pocket_atom_types = args.pocket_atom_types
+
     return config
 
 
