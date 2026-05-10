@@ -1,5 +1,19 @@
-torch>=2.0.0
+# DrugCLIP Dependencies
+# Install: pip install -r train/requirements.txt
+# PyTorch (CUDA 12.8) — install separately from custom index:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+
+# --- Core ---
 numpy>=1.24.0
 rdkit>=2023.03
 scipy>=1.10.0
 tqdm>=4.65.0
+
+# --- Agent (LLM tool calling) ---
+openai>=1.0.0
+
+# --- Pinned transitive (for reproducibility) ---
+httpx>=0.28.0
+pydantic>=2.0.0
+certifi>=2024.0.0
+typing_extensions>=4.0.0
