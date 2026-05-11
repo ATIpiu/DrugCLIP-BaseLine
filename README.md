@@ -72,12 +72,9 @@ Science 论文 *Deep contrastive learning enables genome-wide virtual screening*
 conda create -n drugclip python=3.11 -y
 conda activate drugclip
 
-# CUDA 12.x
-pip install torch --index-url https://download.pytorch.org/whl/cu128
+pip install -r requirements.txt
 
-# 依赖
-pip install numpy rdkit scipy tqdm openai
-```
+
 
 验证：
 

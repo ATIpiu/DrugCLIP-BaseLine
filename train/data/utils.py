@@ -152,7 +152,7 @@ def compute_edge_types(tokens: np.ndarray, num_types: int = None,
         if atom_dict is not None:
             num_types = atom_dict["num_types"]
         else:
-            num_types = len(ATOM_DICT)
+            num_types = NUM_ATOM_TYPES
     # Ensure num_types covers all token indices (e.g. [MASK] token
     # may be outside the atom dict's range but present in the model vocab)
     max_token = int(tokens.max())
