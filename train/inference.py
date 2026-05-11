@@ -4,6 +4,7 @@ Processes all benchmark tasks and generates result.csv with scores.
 """
 
 import csv
+import gc
 import os
 import time
 from pathlib import Path
@@ -92,14 +93,21 @@ class InferenceEngine:
             # Load atom dicts for inference data pipeline if pretrained
             if model_cfg.get("pretrained_path"):
                 from pathlib import Path as _Path
-                ref_data = _Path(__file__).resolve().parent.parent / "ref" / "DrugCLIP-main" / "DrugCLIP-main" / "data"
-                mol_dict_file = ref_data / "dict_mol.txt"
-                pocket_dict_file = ref_data / "dict_pkt.txt"
+                data_dir = _Path(__file__).resolve().parent.parent / "data"
+                mol_dict_file = data_dir / "dict_mol.txt"
+                pocket_dict_file = data_dir / "dict_pkt.txt"
                 if mol_dict_file.exists() and pocket_dict_file.exists():
                     from .data.utils import load_atom_dict
                     self._mol_atom_dict = load_atom_dict(str(mol_dict_file))
                     self._pocket_atom_dict = load_atom_dict(str(pocket_dict_file))
-                    self.logger.log(f"Atom dicts loaded for inference")
+                    # Ensure model's num_atom_types is not smaller than dict's num_types
+                    mol_nt = self._mol_atom_dict["num_types"]
+                    pkt_nt = self._pocket_atom_dict["num_types"]
+                    if self.config.model.mol_atom_types < mol_nt:
+                        self.config.model.mol_atom_types = mol_nt
+                    if self.config.model.pocket_atom_types < pkt_nt:
+                        self.config.model.pocket_atom_types = pkt_nt
+                    self.logger.log(f"Atom dicts loaded for inference (mol={mol_nt}, pocket={pkt_nt})")
                 else:
                     self._mol_atom_dict = None
                     self._pocket_atom_dict = None
@@ -119,6 +127,7 @@ class InferenceEngine:
         results: List[Tuple[str, str, float]] = []
         total_ligands = 0
         t0 = time.time()
+        csv_path = Path(self.config.data.output_dir) / "result.csv"
 
         for i, task_info in enumerate(tasks):
             task_id = task_info["task_id"]
@@ -135,7 +144,15 @@ class InferenceEngine:
 
             self.logger.log_inference_progress(task_id, num, dt)
 
-            if (i + 1) % 20 == 0:
+            # Incremental save every task: crash-safe, never lose results
+            self._write_result_csv(results)
+
+            # Free system RAM: clear SMILES cache + GC every 10 tasks
+            if (i + 1) % 10 == 0:
+                self._mol_cache.clear()
+                gc.collect()
+                self.logger.log(f"Progress: {i+1}/{len(tasks)} tasks done (cache cleared)")
+            elif (i + 1) % 20 == 0:
                 self.logger.log(f"Progress: {i+1}/{len(tasks)} tasks done")
 
         total_time = time.time() - t0
@@ -143,7 +160,7 @@ class InferenceEngine:
         self.logger.log_final_summary(
             len(tasks), total_ligands, total_time, model_path=None,
         )
-        return str(Path(self.config.data.output_dir) / "result.csv")
+        return str(csv_path)
 
     def _score_single_task(
         self, task_dir: Path, task_info: dict

@@ -143,13 +143,21 @@ def compute_edge_types(tokens: np.ndarray, num_types: int = None,
 
     Args:
         tokens: (N,) int array of atom type indices
-        num_types: total number of atom types
+        num_types: total number of atom types (auto-detected from dict or tokens)
         atom_dict: optional custom dict from load_atom_dict()
     Returns:
         (N, N) int64 edge type matrix (src_idx * num_types + dst_idx)
     """
-    if atom_dict is not None:
-        num_types = atom_dict["num_types"]
+    if num_types is None:
+        if atom_dict is not None:
+            num_types = atom_dict["num_types"]
+        else:
+            num_types = len(ATOM_DICT)
+    # Ensure num_types covers all token indices (e.g. [MASK] token
+    # may be outside the atom dict's range but present in the model vocab)
+    max_token = int(tokens.max())
+    if num_types <= max_token:
+        num_types = max_token + 1
     return (tokens[:, None] * num_types + tokens[None, :]).astype(np.int64)
 
 
