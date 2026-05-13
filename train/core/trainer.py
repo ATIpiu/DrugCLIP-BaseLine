@@ -321,6 +321,19 @@ class Trainer:
             shuffle=True, split="train", seed=self.config.seed, max_samples=max_samples,
             mol_atom_dict=self._mol_atom_dict, pocket_atom_dict=self._pocket_atom_dict,
         )
+        # Auto-reduce batch_size when dataset is smaller than configured batch_size
+        if len(train_loader) == 0 and len(train_loader.dataset) > 0:
+            effective_bs = max(1, len(train_loader.dataset))
+            self.logger.log(
+                f"Auto-reducing batch_size {cfg.batch_size} → {effective_bs} "
+                f"({len(train_loader.dataset)} samples < batch_size)"
+            )
+            train_loader = create_dataloader(
+                train_dir, batch_size=effective_bs, num_workers=cfg.num_workers,
+                shuffle=True, split="train", seed=self.config.seed, max_samples=max_samples,
+                drop_last=False,
+                mol_atom_dict=self._mol_atom_dict, pocket_atom_dict=self._pocket_atom_dict,
+            )
         self.logger.log(f"Train: {len(train_loader.dataset)} samples, {len(train_loader)} batches/epoch")
 
         # Validation loader — use train/val split; always drop_last=False for eval
