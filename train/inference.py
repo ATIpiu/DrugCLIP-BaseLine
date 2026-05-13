@@ -97,13 +97,16 @@ class InferenceEngine:
     # ── Persistent cache helpers ──────────────────────────────────────
 
     def _compute_dict_fingerprint(self) -> str:
-        """Fingerprint of current atom dicts — used to invalidate SQLite token cache."""
-        if not self._mol_atom_dict or not self._pocket_atom_dict:
+        """Fingerprint of mol atom dict — used to invalidate SQLite token cache.
+
+        Only mol dict is included because tokens.db stores mol tokens only.
+        Must stay in sync with scripts/build_mol_cache.py _dict_fingerprint().
+        """
+        if not self._mol_atom_dict:
             return "default"
         import json
         mol_repr = json.dumps(sorted(self._mol_atom_dict["atom_to_idx"].items()))
-        pkt_repr = json.dumps(sorted(self._pocket_atom_dict["atom_to_idx"].items()))
-        return hashlib.md5((mol_repr + "|" + pkt_repr).encode()).hexdigest()[:12]
+        return hashlib.md5(mol_repr.encode()).hexdigest()[:12]
 
     @staticmethod
     def _open_token_db(db_path: Path, dict_fingerprint: str = "") -> sqlite3.Connection:
@@ -278,9 +281,10 @@ class InferenceEngine:
             # pocket vocab 单独检测
             pkt_emb_key = next((k for k in sd_keys if "pocket_model.embed_tokens.weight" == k), None)
             pkt_vocab = state_dict[pkt_emb_key].shape[0] if pkt_emb_key else vocab
-            # pocket gbf_k 单独检测
-            pkt_gbf_key = next((k for k in sd_keys if "pocket_model.gbf.mul.weight" == k), None)
-            pkt_gbf_k = state_dict[pkt_gbf_key].shape[0] if pkt_gbf_key else self.config.model.gbf_k
+            # gbf_k = 高斯基函数数量；means.weight 形状 [1, gbf_k]，取 shape[-1]
+            # mul.weight 形状 [num_edge_types, 1]，不能用来推断 gbf_k
+            gbf_means_key = next((k for k in sd_keys if "mol_model.gbf.means.weight" == k), None)
+            pkt_gbf_k = state_dict[gbf_means_key].shape[-1] if gbf_means_key else self.config.model.gbf_k
 
             self.logger.log(
                 f"Auto-adapting arch: mol(dim={dim},ffn={ffn_dim},layers={n_layers},"
@@ -307,11 +311,15 @@ class InferenceEngine:
         self.model.load_state_dict(filtered, strict=False)
         self.logger.log(f"Loaded checkpoint: {path} (epoch {epoch})")
 
-    def run_all_tasks(self) -> str:
+    def run_all_tasks(self, max_tasks: int = 0, task_id: str = "") -> str:
         manifest_path = Path(self.config.data.benchmark_dir) / "manifest.jsonl"
         tasks = load_manifest(str(manifest_path))
+        if task_id:
+            tasks = [t for t in tasks if t["task_id"] == task_id]
+        elif max_tasks > 0:
+            tasks = tasks[:max_tasks]
         self.logger.log_section("Inference — All Tasks")
-        self.logger.log(f"Total tasks: {len(tasks)}")
+        self.logger.log(f"Total tasks: {len(tasks)}{' (limited)' if (max_tasks or task_id) else ''}")
 
         results: List[Tuple[str, str, float]] = []
         total_ligands = 0

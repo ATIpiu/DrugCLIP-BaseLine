@@ -69,6 +69,10 @@ def parse_args():
                    help="Override pocket atom type count (auto-detected from checkpoint)")
     p.add_argument("--no-bos-pool", action="store_true",
                    help="Use mean pooling instead of [BOS] pooling for pretrained models")
+    p.add_argument("--max-tasks", type=int, default=0,
+                   help="Limit inference to first N tasks (0 = all, for quick testing)")
+    p.add_argument("--task-id", default="",
+                   help="Run inference on a single specific task by task_id")
 
     return p.parse_args()
 
@@ -150,7 +154,7 @@ def main():
     if args.mode in ("inference", "full"):
         ckpt = args.ckpt or checkpoint_path
         engine = InferenceEngine(config, checkpoint_path=ckpt)
-        result_csv = engine.run_all_tasks()
+        result_csv = engine.run_all_tasks(max_tasks=args.max_tasks, task_id=args.task_id)
         engine.create_submission_zip()
         print(f"\nResults: {result_csv}")
         print(f"Submission: {Path(config.data.output_dir) / 'result.zip'}")
