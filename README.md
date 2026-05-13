@@ -68,19 +68,33 @@ Science 论文 *Deep contrastive learning enables genome-wide virtual screening*
 
 ## 环境配置
 
+**Windows (PowerShell)**
+
 ```powershell
 conda create -n drugclip python=3.11 -y
 conda activate drugclip
-现在这里寻找自己适合的torch 版本
-按输入命令nvidia-smi查看cuda版本
-比如 我的是 使用上海交大的镜像
+# 先查看 CUDA 版本
+nvidia-smi
+# 按 CUDA 版本选择对应 torch（例：CUDA 13.0，使用上海交大镜像）
 pip install torch torchvision torchaudio --index-url https://mirror.sjtu.edu.cn/pytorch-wheels/cu130
 pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
-验证：
+**Linux / macOS**
 
-```powershell
+```bash
+conda create -n drugclip python=3.11 -y
+conda activate drugclip
+# 先查看 CUDA 版本
+nvidia-smi
+# 按 CUDA 版本选择对应 torch（例：CUDA 12.1）
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+验证（Windows / Linux 通用）：
+
+```bash
 python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA: {torch.cuda.is_available()}')"
 ```
 
@@ -104,13 +118,23 @@ data/THU-ATOM_PDBbind/
 
 **ModelScope 下载：**
 
+**Windows (PowerShell)**
+
 ```powershell
 conda activate drugclip
 modelscope download ATIpiu/THU-ATOM_PDBbind_For_AI4S THU-ATOM_PDBbind.zip --repo-type dataset --local_dir data/
 Expand-Archive -Path data\THU-ATOM_PDBbind.zip -DestinationPath data\ -Force
 ```
 
-或 Python SDK：
+**Linux / macOS**
+
+```bash
+conda activate drugclip
+modelscope download ATIpiu/THU-ATOM_PDBbind_For_AI4S THU-ATOM_PDBbind.zip --repo-type dataset --local_dir data/
+unzip data/THU-ATOM_PDBbind.zip -d data/
+```
+
+或 Python SDK（Windows / Linux 通用）：
 
 ```python
 from modelscope.hub.api import HubApi
@@ -130,24 +154,26 @@ api.download_file(
 
 原始 DrugCLIP checkpoint（unicore 格式，15层/512维/64头），已上传至 ModelScope：
 
-**ModelScope 下载（推荐）：**
+**ModelScope 下载（CLI，Windows / Linux 通用）：**
 
-```powershell
-# 方式一：CLI（单文件，约 1.1 GB）
+```bash
 conda activate drugclip
 modelscope download ATIpiu/DrugCLIP-Base checkpoint_best.pt --local_dir train/model/Base
+```
 
-# 方式二：Python SDK
-conda activate drugclip
-python -c "
+**Python SDK（Windows / Linux 通用）：**
+
+```python
 from modelscope.hub.api import HubApi
 api = HubApi()
 api.login('YOUR_TOKEN')
 from modelscope import snapshot_download
 snapshot_download('ATIpiu/DrugCLIP-Base', local_dir='train/model/Base')
-"
+```
 
-# 方式三：Git LFS
+**Git LFS（Windows / Linux 通用）：**
+
+```bash
 git lfs install
 git clone https://www.modelscope.cn/ATIpiu/DrugCLIP-Base.git train/model/Base
 ```
@@ -180,9 +206,9 @@ data/benchmark/benchmark/
 
 > 用内置的 10 个复合物样本，从训练到出推理结果全跑一遍，确认环境正常。
 
-**1. 微调训练（~10 秒）**
+**1. 微调训练（~10 秒，Windows / Linux 通用）**
 
-```powershell
+```bash
 python -m train.run --mode train --train-data data/fasttest --pretrained train/model/Base/checkpoint_best.pt --freeze-encoder-layers 0,1,2,3,4,5,6,7,8,9,10,11 --freeze-embeddings --freeze-gbf --new-lr 1e-4 --epochs 3 --batch-size 4
 ```
 
@@ -201,11 +227,11 @@ Training Complete | Best Loss: 1.74
 
 ---
 
-**2. 预缓存 benchmark 分子（~1 分钟，快速测试模式）**
+**2. 预缓存 benchmark 分子（~1 分钟，快速测试模式，Windows / Linux 通用）**
 
 > benchmark 共 2,092,260 条配体，全量预缓存需数小时。用 `--max-smiles` 先跑小批验证流程。
 
-```powershell
+```bash
 python scripts/build_mol_cache.py --workers 4 --max-smiles 1000
 ```
 
@@ -216,18 +242,18 @@ Atom dict : data/dict_mol.txt  (30 types)
 共 1,000 个唯一 SMILES
 已缓存: 0 / 1,000
 开始 RDKit 3D 构象生成（4 线程）...
-  [  1,000/1,000] 成功 998 失败 2 | 44 mol/s | ETA 0.0 min
-完成！写入 998 条，DB 大小 xx MB
+  [batch   1] 已处理 1,000 (新写 998 跳过 0 失败 2) | 44 mol/s
+完成！新写 998 条，跳过 0 条，失败 2 条
 ```
 
 ---
 
-**3. 推理（~1 秒，单任务验证）**
+**3. 推理（~1 秒，单任务验证，Windows / Linux 通用）**
 
 > 先用最小任务（811 个配体）验证，避免等待大任务。
 
-```powershell
-  python -m train.run --mode inference --ckpt output/models/drugclip/checkpoints/best.pt --task-id litpcba_TP53
+```bash
+python -m train.run --mode inference --ckpt output/models/drugclip/checkpoints/best.pt --task-id litpcba_TP53
 ```
 
 正常输出：
@@ -245,7 +271,7 @@ Submission: output/result.zip            ← 可提交的压缩包
 
 第二次运行会直接命中 Level-2 embedding 缓存，**0.6s** 完成：
 
-```powershell
+```bash
 python -m train.run --mode inference --ckpt output/models/drugclip/checkpoints/best.pt --task-id litpcba_TP53
 # → [emb cache] 811/811 ligands fully cached
 # → litpcba_TP53: 811 ligands, 0.6s
@@ -253,11 +279,11 @@ python -m train.run --mode inference --ckpt output/models/drugclip/checkpoints/b
 
 ---
 
-### 正式训练（完整数据）
+### 正式训练（完整数据，Windows / Linux 通用）
 
 从原始 DrugCLIP checkpoint 出发，冻结前 12 层 encoder + embedding + GBF，只微调最后 3 层 + projection head：
 
-```powershell
+```bash
 python -m train.run --mode train --pretrained train/model/Base/checkpoint_best.pt --freeze-encoder-layers 0,1,2,3,4,5,6,7,8,9,10,11 --freeze-embeddings --freeze-gbf --new-lr 1e-4 --train-data data/THU-ATOM_PDBbind --epochs 20 --batch-size 32
 ```
 
@@ -266,15 +292,15 @@ python -m train.run --mode train --pretrained train/model/Base/checkpoint_best.p
 - 加载全部 encoder + GBF + projection 权重
 - 使用 `data/dict_mol.txt`（30 类型）和 `data/dict_pkt.txt`（9 类型）进行 tokenization
 
-### 全量训练 + 提交生成
+### 全量训练 + 提交生成（Windows / Linux 通用）
 
-```powershell
+```bash
 python -m train.run --mode full --pretrained train/model/Base/checkpoint_best.pt --freeze-encoder-layers 0,1,2,3,4,5,6,7,8,9,10,11 --freeze-embeddings --freeze-gbf --new-lr 1e-4 --train-data data/THU-ATOM_PDBbind --benchmark-dir data/benchmark/benchmark --epochs 20 --batch-size 32
 ```
 
-### 仅推理（全量 benchmark）
+### 仅推理（全量 benchmark，Windows / Linux 通用）
 
-```powershell
+```bash
 # 全量 117 任务（建议先跑完整预缓存，否则耗时数小时）
 python -m train.run --mode inference --ckpt output/models/drugclip/checkpoints/best.pt
 
@@ -285,11 +311,11 @@ python -m train.run --mode inference --ckpt output/models/drugclip/checkpoints/b
 python -m train.run --mode inference --ckpt output/models/drugclip/checkpoints/best.pt --max-tasks 5
 ```
 
-### 推理加速：预缓存全量分子库
+### 推理加速：预缓存全量分子库（Windows / Linux 通用）
 
 benchmark 共有 **2,092,260 条**配体，全量预缓存后推理无需 RDKit，速度提升 10-100x：
 
-```powershell
+```bash
 # 全量预缓存（约 3~6 小时，只需一次，之后永久生效）
 python scripts/build_mol_cache.py --workers 4
 
@@ -312,9 +338,9 @@ python scripts/build_mol_cache.py --workers 4
 
 命中顺序：**Level-2（跳过 RDKit + 模型前向）→ Level-1（跳过 RDKit）→ 实时 RDKit**
 
-### Agent 自主优化
+### Agent 自主优化（Windows / Linux 通用）
 
-```powershell
+```bash
 python -m train.run --mode agent --train-data data/THU-ATOM_PDBbind
 ```
 
@@ -351,9 +377,9 @@ Agent 支持微调模式调参：可自动调整冻结层数、学习率、batch
 | `--pocket-atom-types` | None | 覆盖 pocket 原子类型数（自动检测） |
 | `--no-bos-pool` | False | 使用 mean pooling 代替 `[BOS]` pooling |
 
-### 微调示例
+### 微调示例（Windows / Linux 通用）
 
-```powershell
+```bash
 # 只解冻 1 层（layer 14），5 epoch 快速验证
 python -m train.run --mode train --pretrained train/model/Base/checkpoint_best.pt --freeze-encoder-layers 0,1,2,3,4,5,6,7,8,9,10,11,12,13 --freeze-embeddings --freeze-gbf --new-lr 1e-4 --train-data data/THU-ATOM_PDBbind --max-samples 530 --epochs 5
 
@@ -427,6 +453,7 @@ DrugCLIP/
 │   └── base_agent.py          # Agent 基类
 ├── scripts/
 │   ├── build_mol_cache.py     # 预缓存全量 benchmark SMILES tokenization（与 ckpt 无关）
+│   ├── upload_cache_to_modelscope.py  # 上传 tokens.db 到 ModelScope
 │   ├── fill_random.py         # 填充随机分数（调试用）
 │   └── pack_submission.py     # 打包提交文件
 ├── output/
@@ -446,7 +473,7 @@ DrugCLIP/
 
 ### Q：CUDA Out of Memory？
 
-```powershell
+```bash
 python -m train.run --mode train --batch-size 16 --train-data data/THU-ATOM_PDBbind
 ```
 
@@ -465,7 +492,7 @@ python -m train.run --mode train --batch-size 16 --train-data data/THU-ATOM_PDBb
 
 ### Q：只想用 10% 数据快速迭代？
 
-```powershell
+```bash
 python -m train.run --mode train --pretrained train/model/Base/checkpoint_best.pt --freeze-encoder-layers 0,1,2,3,4,5,6,7,8,9,10,11,12,13 --freeze-embeddings --freeze-gbf --new-lr 1e-4 --train-data data/THU-ATOM_PDBbind --max-samples 530 --epochs 5
 ```
 
@@ -473,7 +500,7 @@ python -m train.run --mode train --pretrained train/model/Base/checkpoint_best.p
 
 先跑一次预缓存脚本（只需一次，之后永久生效）：
 
-```powershell
+```bash
 python scripts/build_mol_cache.py --workers 4
 ```
 
@@ -485,3 +512,15 @@ python scripts/build_mol_cache.py --workers 4
 
 Level-1（tokens.db）始终有效。Level-2 嵌入缓存按 checkpoint 文件大小 + 修改时间自动隔离，
 换 checkpoint 后首次推理会重新编码并建立新 checkpoint 的 Level-2 缓存。
+
+### Q：Windows 解压 zip 文件？
+
+```powershell
+Expand-Archive -Path data\THU-ATOM_PDBbind.zip -DestinationPath data\ -Force
+```
+
+Linux / macOS 用：
+
+```bash
+unzip data/THU-ATOM_PDBbind.zip -d data/
+```
