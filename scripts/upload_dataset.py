@@ -3,6 +3,7 @@
 用法:
     python scripts/upload_dataset.py
 """
+import os
 from pathlib import Path
 
 # 在导入 modelscope 之后、调用 API 之前，把生物信息格式加入 LFS 列表
@@ -13,7 +14,7 @@ for _ext in ['.pdb', '.sdf', '.mol2']:
 
 from modelscope.hub.api import HubApi
 
-TOKEN   = "REMOVED_SEE_ENV"
+TOKEN = os.environ.get("MODELSCOPE_TOKEN", "")
 REPO_ID = "ATIpiu/THU-ATOM_PDBbind_For_AI4S"
 SRC_DIR = r"D:\vscode\DrugCLIP\data\THU-ATOM_PDBbind"
 
