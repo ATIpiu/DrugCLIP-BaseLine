@@ -71,7 +71,10 @@ Science 论文 *Deep contrastive learning enables genome-wide virtual screening*
 ```powershell
 conda create -n drugclip python=3.11 -y
 conda activate drugclip
-
+现在这里寻找自己适合的torch 版本
+按输入命令nvidia-smi查看cuda版本
+比如 我的是 使用上海交大的镜像
+pip install torch torchvision torchaudio --index-url https://mirror.sjtu.edu.cn/pytorch-wheels/cu130
 pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
@@ -103,7 +106,7 @@ data/THU-ATOM_PDBbind/
 
 ```powershell
 conda activate drugclip
-modelscope download ATIpiu/THU-ATOM_PDBbind_For_AI4S THU-ATOM_PDBbind.zip --repo-type dataset --local-dir data/
+modelscope download ATIpiu/THU-ATOM_PDBbind_For_AI4S THU-ATOM_PDBbind.zip --repo-type dataset --local_dir data/
 # 解压
 cd data && unzip THU-ATOM_PDBbind.zip && cd ..
 ```
@@ -133,8 +136,7 @@ api.download_file(
 ```powershell
 # 方式一：CLI（单文件，约 1.1 GB）
 conda activate drugclip
-modelscope login --token YOUR_TOKEN
-modelscope download ATIpiu/DrugCLIP-Base checkpoint_best.pt --local-dir train/model/Base
+modelscope download ATIpiu/DrugCLIP-Base checkpoint_best.pt --local_dir train/model/Base
 
 # 方式二：Python SDK
 conda activate drugclip
@@ -182,13 +184,7 @@ data/benchmark/benchmark/
 **1. 微调训练（~10 秒）**
 
 ```powershell
-python -m train.run --mode train \
-    --train-data data/fasttest \
-    --pretrained train/model/Base/checkpoint_best.pt \
-    --freeze-encoder-layers 0,1,2,3,4,5,6,7,8,9,10,11 \
-    --freeze-embeddings --freeze-gbf \
-    --new-lr 1e-4 \
-    --epochs 3 --batch-size 4
+python -m train.run --mode train --train-data data/fasttest --pretrained train/model/Base/checkpoint_best.pt --freeze-encoder-layers 0,1,2,3,4,5,6,7,8,9,10,11 --freeze-embeddings --freeze-gbf --new-lr 1e-4 --epochs 3 --batch-size 4
 ```
 
 正常输出（关键日志）：
@@ -232,9 +228,7 @@ Atom dict : data/dict_mol.txt  (30 types)
 > 先用最小任务（811 个配体）验证，避免等待大任务。
 
 ```powershell
-python -m train.run --mode inference \
-    --ckpt output/models/drugclip/checkpoints/best.pt \
-    --task-id litpcba_TP53
+  python -m train.run --mode inference --ckpt output/models/drugclip/checkpoints/best.pt --task-id litpcba_TP53
 ```
 
 正常输出：
@@ -253,9 +247,7 @@ Submission: output/result.zip            ← 可提交的压缩包
 第二次运行会直接命中 Level-2 embedding 缓存，**0.6s** 完成：
 
 ```powershell
-python -m train.run --mode inference \
-    --ckpt output/models/drugclip/checkpoints/best.pt \
-    --task-id litpcba_TP53
+python -m train.run --mode inference --ckpt output/models/drugclip/checkpoints/best.pt --task-id litpcba_TP53
 # → [emb cache] 811/811 ligands fully cached
 # → litpcba_TP53: 811 ligands, 0.6s
 ```
@@ -267,13 +259,7 @@ python -m train.run --mode inference \
 从原始 DrugCLIP checkpoint 出发，冻结前 12 层 encoder + embedding + GBF，只微调最后 3 层 + projection head：
 
 ```powershell
-python -m train.run --mode train \
-    --pretrained train/model/Base/checkpoint_best.pt \
-    --freeze-encoder-layers 0,1,2,3,4,5,6,7,8,9,10,11 \
-    --freeze-embeddings --freeze-gbf \
-    --new-lr 1e-4 \
-    --train-data data/THU-ATOM_PDBbind \
-    --epochs 20 --batch-size 32
+python -m train.run --mode train --pretrained train/model/Base/checkpoint_best.pt --freeze-encoder-layers 0,1,2,3,4,5,6,7,8,9,10,11 --freeze-embeddings --freeze-gbf --new-lr 1e-4 --train-data data/THU-ATOM_PDBbind --epochs 20 --batch-size 32
 ```
 
 微调模式会自动：
@@ -284,32 +270,20 @@ python -m train.run --mode train \
 ### 全量训练 + 提交生成
 
 ```powershell
-python -m train.run --mode full \
-    --pretrained train/model/Base/checkpoint_best.pt \
-    --freeze-encoder-layers 0,1,2,3,4,5,6,7,8,9,10,11 \
-    --freeze-embeddings --freeze-gbf \
-    --new-lr 1e-4 \
-    --train-data data/THU-ATOM_PDBbind \
-    --benchmark-dir data/benchmark/benchmark \
-    --epochs 20 --batch-size 32
+python -m train.run --mode full --pretrained train/model/Base/checkpoint_best.pt --freeze-encoder-layers 0,1,2,3,4,5,6,7,8,9,10,11 --freeze-embeddings --freeze-gbf --new-lr 1e-4 --train-data data/THU-ATOM_PDBbind --benchmark-dir data/benchmark/benchmark --epochs 20 --batch-size 32
 ```
 
 ### 仅推理（全量 benchmark）
 
 ```powershell
 # 全量 117 任务（建议先跑完整预缓存，否则耗时数小时）
-python -m train.run --mode inference \
-    --ckpt output/models/drugclip/checkpoints/best.pt
+python -m train.run --mode inference --ckpt output/models/drugclip/checkpoints/best.pt
 
 # 指定单任务（快速验证）
-python -m train.run --mode inference \
-    --ckpt output/models/drugclip/checkpoints/best.pt \
-    --task-id litpcba_TP53
+python -m train.run --mode inference --ckpt output/models/drugclip/checkpoints/best.pt --task-id litpcba_TP53
 
 # 限制前 N 个任务
-python -m train.run --mode inference \
-    --ckpt output/models/drugclip/checkpoints/best.pt \
-    --max-tasks 5
+python -m train.run --mode inference --ckpt output/models/drugclip/checkpoints/best.pt --max-tasks 5
 ```
 
 ### 推理加速：预缓存全量分子库
@@ -382,16 +356,10 @@ Agent 支持微调模式调参：可自动调整冻结层数、学习率、batch
 
 ```powershell
 # 只解冻 1 层（layer 14），5 epoch 快速验证
-python -m train.run --mode train --pretrained train/model/Base/checkpoint_best.pt \
-    --freeze-encoder-layers 0,1,2,3,4,5,6,7,8,9,10,11,12,13 \
-    --freeze-embeddings --freeze-gbf --new-lr 1e-4 \
-    --train-data data/THU-ATOM_PDBbind --max-samples 530 --epochs 5
+python -m train.run --mode train --pretrained train/model/Base/checkpoint_best.pt --freeze-encoder-layers 0,1,2,3,4,5,6,7,8,9,10,11,12,13 --freeze-embeddings --freeze-gbf --new-lr 1e-4 --train-data data/THU-ATOM_PDBbind --max-samples 530 --epochs 5
 
 # 解冻后 3 层，全量数据，100 epoch
-python -m train.run --mode train --pretrained train/model/Base/checkpoint_best.pt \
-    --freeze-encoder-layers 0,1,2,3,4,5,6,7,8,9,10,11 \
-    --freeze-embeddings --freeze-gbf --new-lr 1e-4 \
-    --train-data data/THU-ATOM_PDBbind --epochs 100 --batch-size 32
+python -m train.run --mode train --pretrained train/model/Base/checkpoint_best.pt --freeze-encoder-layers 0,1,2,3,4,5,6,7,8,9,10,11 --freeze-embeddings --freeze-gbf --new-lr 1e-4 --train-data data/THU-ATOM_PDBbind --epochs 100 --batch-size 32
 ```
 
 ---
@@ -499,10 +467,7 @@ python -m train.run --mode train --batch-size 16 --train-data data/THU-ATOM_PDBb
 ### Q：只想用 10% 数据快速迭代？
 
 ```powershell
-python -m train.run --mode train --pretrained train/model/Base/checkpoint_best.pt \
-    --freeze-encoder-layers 0,1,2,3,4,5,6,7,8,9,10,11,12,13 \
-    --freeze-embeddings --freeze-gbf --new-lr 1e-4 \
-    --train-data data/THU-ATOM_PDBbind --max-samples 530 --epochs 5
+python -m train.run --mode train --pretrained train/model/Base/checkpoint_best.pt --freeze-encoder-layers 0,1,2,3,4,5,6,7,8,9,10,11,12,13 --freeze-embeddings --freeze-gbf --new-lr 1e-4 --train-data data/THU-ATOM_PDBbind --max-samples 530 --epochs 5
 ```
 
 ### Q：推理太慢怎么办？
