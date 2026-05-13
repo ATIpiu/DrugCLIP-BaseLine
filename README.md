@@ -103,14 +103,23 @@ data/THU-ATOM_PDBbind/
 
 ```powershell
 conda activate drugclip
-modelscope download ATIpiu/THU-ATOM_PDBbind_For_AI4S --repo-type dataset --local-dir data/THU-ATOM_PDBbind
+modelscope download ATIpiu/THU-ATOM_PDBbind_For_AI4S THU-ATOM_PDBbind.zip --repo-type dataset --local-dir data/
+# 解压
+cd data && unzip THU-ATOM_PDBbind.zip && cd ..
 ```
 
 或 Python SDK：
 
 ```python
-from modelscope import snapshot_download
-snapshot_download('ATIpiu/THU-ATOM_PDBbind_For_AI4S', repo_type='dataset', local_dir='data/THU-ATOM_PDBbind')
+from modelscope.hub.api import HubApi
+api = HubApi()
+api.download_file(
+    model_id='ATIpiu/THU-ATOM_PDBbind_For_AI4S',
+    file_path='THU-ATOM_PDBbind.zip',
+    local_dir='data/',
+    repo_type='dataset',
+)
+# 解压后目录为 data/THU-ATOM_PDBbind/
 ```
 
 数据集页面：https://www.modelscope.cn/datasets/ATIpiu/THU-ATOM_PDBbind_For_AI4S

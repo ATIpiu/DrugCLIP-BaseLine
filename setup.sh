@@ -87,16 +87,22 @@ fi
 if $FULL_DATA; then
   DATA_DIR="data/THU-ATOM_PDBbind"
   if [ ! -d "$DATA_DIR" ] || [ -z "$(ls -A $DATA_DIR 2>/dev/null)" ]; then
-    echo "[*] 下载 THU-ATOM_PDBbind 数据集 (~1.87 GB) ..."
+    echo "[*] 下载 THU-ATOM_PDBbind 数据集 (~420 MB zip) ..."
     $PY - <<PYEOF
-from modelscope import snapshot_download
-snapshot_download(
+from modelscope.hub.api import HubApi
+api = HubApi()
+api.download_file(
     model_id='ATIpiu/THU-ATOM_PDBbind_For_AI4S',
+    file_path='THU-ATOM_PDBbind.zip',
+    local_dir='data/',
     repo_type='dataset',
-    local_dir='${DATA_DIR}',
 )
-print('[✓] 数据集下载完成: ${DATA_DIR}')
+print('[✓] 下载完成: data/THU-ATOM_PDBbind.zip')
 PYEOF
+    echo "[*] 解压数据集 ..."
+    unzip -q data/THU-ATOM_PDBbind.zip -d data/
+    rm data/THU-ATOM_PDBbind.zip
+    echo "[✓] 数据集就绪: ${DATA_DIR}"
     TRAIN_DATA="$DATA_DIR"
   else
     echo "[✓] 数据集已存在: ${DATA_DIR}"
