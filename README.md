@@ -175,13 +175,94 @@ data/benchmark/benchmark/
 
 ## 快速开始
 
-### 快速调试（30 秒）
+### 第一步：完整流程验证（fasttest，约 3 分钟跑通）
+
+> 用内置的 10 个复合物样本，从训练到出推理结果全跑一遍，确认环境正常。
+
+**1. 微调训练（~10 秒）**
 
 ```powershell
-python -m train.run --mode train --train-data data/fasttest --epochs 1 --batch-size 8
+python -m train.run --mode train \
+    --train-data data/fasttest \
+    --pretrained train/model/Base/checkpoint_best.pt \
+    --freeze-encoder-layers 0,1,2,3,4,5,6,7,8,9,10,11 \
+    --freeze-embeddings --freeze-gbf \
+    --new-lr 1e-4 \
+    --epochs 3 --batch-size 4
 ```
 
-### 微调预训练模型（推荐）
+正常输出（关键日志）：
+
+```
+Loaded pretrained: train/model/Base/checkpoint_best.pt
+  Missing keys: 4  Unexpected keys: 0        ← 只有 extra head 缺失，正常
+Atom dicts loaded: mol=30 types, pocket=9 types   ← 字典加载成功
+Freeze: 75,730,378 frozen / 19,575,297 trainable params
+Epoch   3 | Loss: 1.74 | NCE: 1.69 | ...
+Training Complete | Best Loss: 1.74
+```
+
+输出 checkpoint：`output/models/drugclip/checkpoints/best.pt`
+
+---
+
+**2. 预缓存 benchmark 分子（~1 分钟，快速测试模式）**
+
+> benchmark 共 2,092,260 条配体，全量预缓存需数小时。用 `--max-smiles` 先跑小批验证流程。
+
+```powershell
+python scripts/build_mol_cache.py --workers 4 --max-smiles 1000
+```
+
+正常输出：
+
+```
+Atom dict : data/dict_mol.txt  (30 types)
+共 1,000 个唯一 SMILES
+已缓存: 0 / 1,000
+开始 RDKit 3D 构象生成（4 线程）...
+  [  1,000/1,000] 成功 998 失败 2 | 44 mol/s | ETA 0.0 min
+完成！写入 998 条，DB 大小 xx MB
+```
+
+---
+
+**3. 推理（~1 秒，单任务验证）**
+
+> 先用最小任务（811 个配体）验证，避免等待大任务。
+
+```powershell
+python -m train.run --mode inference \
+    --ckpt output/models/drugclip/checkpoints/best.pt \
+    --task-id litpcba_TP53
+```
+
+正常输出：
+
+```
+Atom dicts: mol=30 types, pocket=9 types
+Auto-adapting arch: mol(dim=512,...,gbf_k=128) pocket(vocab=10,gbf_k=128)
+Loaded checkpoint: ... (epoch 3)
+Total tasks: 1 (limited)
+  Preparing 811 ligands via RDKit ...     ← 第一次跑 RDKit（~10s）
+  litpcba_TP53: 811 ligands, 10.2s
+result.csv: output/result.csv (811 entries)
+Submission: output/result.zip            ← 可提交的压缩包
+```
+
+第二次运行会直接命中 Level-2 embedding 缓存，**0.6s** 完成：
+
+```powershell
+python -m train.run --mode inference \
+    --ckpt output/models/drugclip/checkpoints/best.pt \
+    --task-id litpcba_TP53
+# → [emb cache] 811/811 ligands fully cached
+# → litpcba_TP53: 811 ligands, 0.6s
+```
+
+---
+
+### 正式训练（完整数据）
 
 从原始 DrugCLIP checkpoint 出发，冻结前 12 层 encoder + embedding + GBF，只微调最后 3 层 + projection head：
 
@@ -197,10 +278,8 @@ python -m train.run --mode train \
 
 微调模式会自动：
 - 检测 checkpoint 架构（层数/维度/heads/原子类型数）
-- 构建匹配模型（NonLinearHead projection + GBF projection）
-- 加载全部 encoder + projection + GBF 权重
-- 加载 checkpoint 对应的 atom 字典进行数据 tokenization
-- 使用 `[BOS]` token pooling（匹配预训练方式）
+- 加载全部 encoder + GBF + projection 权重
+- 使用 `data/dict_mol.txt`（30 类型）和 `data/dict_pkt.txt`（9 类型）进行 tokenization
 
 ### 全量训练 + 提交生成
 
@@ -215,29 +294,41 @@ python -m train.run --mode full \
     --epochs 20 --batch-size 32
 ```
 
-### 仅推理
+### 仅推理（全量 benchmark）
 
 ```powershell
+# 全量 117 任务（建议先跑完整预缓存，否则耗时数小时）
+python -m train.run --mode inference \
+    --ckpt output/models/drugclip/checkpoints/best.pt
+
+# 指定单任务（快速验证）
 python -m train.run --mode inference \
     --ckpt output/models/drugclip/checkpoints/best.pt \
-    --benchmark-dir data/benchmark/benchmark
+    --task-id litpcba_TP53
+
+# 限制前 N 个任务
+python -m train.run --mode inference \
+    --ckpt output/models/drugclip/checkpoints/best.pt \
+    --max-tasks 5
 ```
 
-推理引擎自动从 `config.json` 读取完整模型架构和 atom 字典配置。
+### 推理加速：预缓存全量分子库
 
-### 推理加速：预缓存分子库（强烈推荐）
-
-benchmark 共有 **2,092,260 条**配体记录，每次推理都实时跑 RDKit 3D 构象生成耗时极长。
-提供独立脚本一次性将全部 SMILES 的 tokenization 结果存入 SQLite，后续推理直接加载，**与 checkpoint 无关**：
+benchmark 共有 **2,092,260 条**配体，全量预缓存后推理无需 RDKit，速度提升 10-100x：
 
 ```powershell
-# 首次运行（约 3~6 小时，取决于 CPU 核心数）
-conda activate drugclip
+# 全量预缓存（约 3~6 小时，只需一次，之后永久生效）
 python scripts/build_mol_cache.py --workers 4
+
+# 快速测试（只缓存前 N 个，验证流程）
+python scripts/build_mol_cache.py --workers 4 --max-smiles 1000
 
 # 中断后续跑：自动跳过已缓存条目
 python scripts/build_mol_cache.py --workers 4
 ```
+
+> **为什么推理慢？** 未预缓存时每个 SMILES 需实时跑 RDKit 3D 构象生成（约 44 mol/s）。
+> benchmark 最大任务有 8 万个配体，全跑 RDKit 需 30+ 分钟。**先跑预缓存是关键。**
 
 缓存层级说明：
 
@@ -246,8 +337,7 @@ python scripts/build_mol_cache.py --workers 4
 | Level-1 Token 缓存 | SMILES → tokens / distances / edge_types | `output/mol_cache/tokens.db` | 永久，与 checkpoint 无关 |
 | Level-2 Embedding 缓存 | SMILES → 嵌入向量 | `output/mol_cache/emb/{ckpt_hash}/{task_id}.pkl` | 按 checkpoint 隔离 |
 
-推理时的命中顺序：**Level-2（跳过 RDKit + 模型前向）→ Level-1（跳过 RDKit）→ 实时 RDKit 计算**。
-缓存全部命中后，单任务推理从数分钟降至数秒。
+命中顺序：**Level-2（跳过 RDKit + 模型前向）→ Level-1（跳过 RDKit）→ 实时 RDKit**
 
 ### Agent 自主优化
 
