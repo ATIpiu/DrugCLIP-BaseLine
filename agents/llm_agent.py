@@ -236,6 +236,18 @@ class LLMMainAgent:
         self.agent_log = AgentLogger(config.data.output_dir, "main")
         self.model = model
 
+        # Auto-configure pretrained fine-tuning if Base checkpoint exists and not already set
+        if not config.model.pretrained_path:
+            from pathlib import Path as _P
+            _base = _P(__file__).resolve().parent.parent / "train" / "model" / "Base" / "checkpoint_best.pt"
+            if _base.exists():
+                config.model.pretrained_path = str(_base)
+                config.train.freeze_encoder_layers = list(range(12))
+                config.train.freeze_embeddings = True
+                config.train.freeze_gbf = True
+                config.train.new_lr = 1e-4
+                print(f"[Agent] Auto-configured fine-tuning from {_base.name} (freeze 0-11, lr=1e-4)")
+
         self.context = {"config": config, "checkpoint": None, "history": [], "reference_docs": {}}
         self.messages = [{"role": "system", "content": SYSTEM_PROMPT}]
 
