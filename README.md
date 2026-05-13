@@ -72,7 +72,7 @@ Science 论文 *Deep contrastive learning enables genome-wide virtual screening*
 conda create -n drugclip python=3.11 -y
 conda activate drugclip
 
-pip install -r requirements.txt
+pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 
 验证：
