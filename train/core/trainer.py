@@ -58,29 +58,25 @@ class Trainer:
         # Apply freezing
         freeze_info = self._apply_freezing()
 
-        # Auto-load atom dicts for pretrained models (compatible tokenization)
+        # Always load atom dicts from dict files (ensures tokenization matches embedding table)
         self._mol_atom_dict = None
         self._pocket_atom_dict = None
-        if config.model.pretrained_path:
-            from pathlib import Path as _Path
-            data_dir = _Path(__file__).resolve().parent.parent.parent / "data"
-            mol_dict_path = data_dir / "dict_mol.txt"
-            pocket_dict_path = data_dir / "dict_pkt.txt"
-            if mol_dict_path.exists() and pocket_dict_path.exists():
-                from ..data.utils import load_atom_dict
-                self._mol_atom_dict = load_atom_dict(str(mol_dict_path))
-                self._pocket_atom_dict = load_atom_dict(str(pocket_dict_path))
-                # Validate: model's num_atom_types must be >= dict's num_types
-                # to prevent GBF embedding index out-of-bounds
-                mol_nt = self._mol_atom_dict["num_types"]
-                pkt_nt = self._pocket_atom_dict["num_types"]
-                if config.model.mol_atom_types < mol_nt:
-                    self.logger.log(f"WARNING: mol_atom_types ({config.model.mol_atom_types}) < dict num_types ({mol_nt}), adjusting")
-                    config.model.mol_atom_types = mol_nt
-                if config.model.pocket_atom_types < pkt_nt:
-                    self.logger.log(f"WARNING: pocket_atom_types ({config.model.pocket_atom_types}) < dict num_types ({pkt_nt}), adjusting")
-                    config.model.pocket_atom_types = pkt_nt
-                self.logger.log(f"Atom dicts loaded: mol={mol_nt} types, pocket={pkt_nt} types")
+        from pathlib import Path as _Path
+        from ..data.utils import load_atom_dict
+        data_dir = _Path(__file__).resolve().parent.parent.parent / "data"
+        mol_dict_path    = data_dir / "dict_mol.txt"
+        pocket_dict_path = data_dir / "dict_pkt.txt"
+        if mol_dict_path.exists() and pocket_dict_path.exists():
+            self._mol_atom_dict    = load_atom_dict(str(mol_dict_path))
+            self._pocket_atom_dict = load_atom_dict(str(pocket_dict_path))
+            mol_nt = self._mol_atom_dict["num_types"]
+            pkt_nt = self._pocket_atom_dict["num_types"]
+            # Ensure model embedding table is large enough for all token indices
+            if config.model.mol_atom_types < mol_nt:
+                config.model.mol_atom_types = mol_nt
+            if config.model.pocket_atom_types < pkt_nt:
+                config.model.pocket_atom_types = pkt_nt
+            self.logger.log(f"Atom dicts loaded: mol={mol_nt} types, pocket={pkt_nt} types")
 
         self.criterion = CombinedLoss()
         self.optimizer = optim.AdamW(
