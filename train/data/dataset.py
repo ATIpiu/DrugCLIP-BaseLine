@@ -199,11 +199,12 @@ def _pad_2d(tensors, pad_val):
     return padded
 
 
-def collate_mol_fn(batch: list) -> dict:
+def collate_mol_fn(batch: list, pad_idx: int = None) -> dict:
     """Pad ligand-only batches — used by inference when no pocket data."""
     from .utils import PAD_IDX
+    pad = pad_idx if pad_idx is not None else PAD_IDX
     return {
-        "mol_tokens": _pad_1d([b["mol_tokens"] for b in batch], PAD_IDX),
+        "mol_tokens": _pad_1d([b["mol_tokens"] for b in batch], pad),
         "mol_distances": _pad_2d([b["mol_distances"] for b in batch], 0.0),
         "mol_edge_types": _pad_2d([b["mol_edge_types"] for b in batch], 0),
     }

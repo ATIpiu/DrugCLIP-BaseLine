@@ -18,10 +18,10 @@ ATOM_DICT = [
 class EncoderConfig:
     """Shared Transformer encoder hyperparameters (used for both mol & pocket)."""
 
-    encoder_layers: int = 8
-    encoder_embed_dim: int = 384
-    encoder_ffn_embed_dim: int = 1536
-    encoder_attention_heads: int = 32
+    encoder_layers: int = 15
+    encoder_embed_dim: int = 512
+    encoder_ffn_embed_dim: int = 2048
+    encoder_attention_heads: int = 64
     dropout: float = 0.2
     emb_dropout: float = 0.1
     attention_dropout: float = 0.1
@@ -51,8 +51,8 @@ class ModelConfig:
     pretrained_path: Optional[str] = None
 
     # Atom type counts (separate for mol/pocket, default from ATOM_DICT)
-    mol_atom_types: int = 24
-    pocket_atom_types: int = 24
+    mol_atom_types: int = 31
+    pocket_atom_types: int = 10
 
     # Use [BOS] token embedding for pooling (matches original DrugCLIP pretraining)
     use_bos_pool: bool = False

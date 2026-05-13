@@ -57,13 +57,30 @@ class InferenceEngine:
         self._mol_atom_dict = None
         self._pocket_atom_dict = None
 
+        # Always load atom dicts from data/ — required for correct base model tokenization.
+        # dict_mol.txt (31 types) and dict_pkt.txt (10 types) match the pretrained base model's
+        # embedding table sizes; using the old 24-type ATOM_LIST causes CUDA index out-of-bounds.
+        _data_dir = Path(__file__).resolve().parent.parent / "data"
+        _mol_dict_path = _data_dir / "dict_mol.txt"
+        _pkt_dict_path = _data_dir / "dict_pkt.txt"
+        if _mol_dict_path.exists() and _pkt_dict_path.exists():
+            from .data.utils import load_atom_dict
+            self._mol_atom_dict = load_atom_dict(str(_mol_dict_path))
+            self._pocket_atom_dict = load_atom_dict(str(_pkt_dict_path))
+            self.logger.log(
+                f"Atom dicts: mol={self._mol_atom_dict['num_types']} types, "
+                f"pocket={self._pocket_atom_dict['num_types']} types"
+            )
+
         # Persistent caches
         cache_dir = Path(config.data.output_dir) / "mol_cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         # Level-1 disk cache (checkpoint-independent): SQLite DB
         # Maps smiles_md5 → pickled {mol_tokens, mol_distances, mol_edge_types} numpy arrays
-        self._token_db = self._open_token_db(cache_dir / "tokens.db")
+        # Cache is invalidated automatically when the atom dict changes.
+        _dict_fp = self._compute_dict_fingerprint()
+        self._token_db = self._open_token_db(cache_dir / "tokens.db", _dict_fp)
         self._token_pending: int = 0  # uncommitted inserts, flushed every batch
 
         # Level-2 disk cache (checkpoint-dependent): per-task pickle files
@@ -79,11 +96,26 @@ class InferenceEngine:
 
     # ── Persistent cache helpers ──────────────────────────────────────
 
+    def _compute_dict_fingerprint(self) -> str:
+        """Fingerprint of current atom dicts — used to invalidate SQLite token cache."""
+        if not self._mol_atom_dict or not self._pocket_atom_dict:
+            return "default"
+        import json
+        mol_repr = json.dumps(sorted(self._mol_atom_dict["atom_to_idx"].items()))
+        pkt_repr = json.dumps(sorted(self._pocket_atom_dict["atom_to_idx"].items()))
+        return hashlib.md5((mol_repr + "|" + pkt_repr).encode()).hexdigest()[:12]
+
     @staticmethod
-    def _open_token_db(db_path: Path) -> sqlite3.Connection:
+    def _open_token_db(db_path: Path, dict_fingerprint: str = "") -> sqlite3.Connection:
         conn = sqlite3.connect(str(db_path))
         conn.execute("PRAGMA journal_mode=WAL")    # concurrent reads while writing
         conn.execute("PRAGMA synchronous=NORMAL")  # faster writes, safe enough
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS db_meta (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        """)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS mol_tokens (
                 smiles_hash TEXT PRIMARY KEY,
@@ -91,6 +123,26 @@ class InferenceEngine:
             )
         """)
         conn.commit()
+
+        # Invalidate token cache if atom dict changed (old entries have wrong indices)
+        if dict_fingerprint:
+            row = conn.execute(
+                "SELECT value FROM db_meta WHERE key = 'dict_fingerprint'"
+            ).fetchone()
+            stored_fp = row[0] if row else ""
+            if stored_fp != dict_fingerprint:
+                deleted = conn.execute("DELETE FROM mol_tokens").rowcount
+                conn.execute(
+                    "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('dict_fingerprint', ?)",
+                    (dict_fingerprint,)
+                )
+                conn.commit()
+                if deleted:
+                    import logging
+                    logging.getLogger(__name__).info(
+                        f"Token cache cleared ({deleted} entries) — atom dict changed"
+                    )
+
         return conn
 
     @staticmethod
@@ -199,33 +251,62 @@ class InferenceEngine:
             del self.model
             self.model = DrugCLIP(self.config.model).to(self.device)
 
-            # Load atom dicts for inference data pipeline if pretrained
-            if model_cfg.get("pretrained_path"):
-                from pathlib import Path as _Path
-                data_dir = _Path(__file__).resolve().parent.parent / "data"
-                mol_dict_file = data_dir / "dict_mol.txt"
-                pocket_dict_file = data_dir / "dict_pkt.txt"
-                if mol_dict_file.exists() and pocket_dict_file.exists():
-                    from .data.utils import load_atom_dict
-                    self._mol_atom_dict = load_atom_dict(str(mol_dict_file))
-                    self._pocket_atom_dict = load_atom_dict(str(pocket_dict_file))
-                    # Ensure model's num_atom_types is not smaller than dict's num_types
-                    mol_nt = self._mol_atom_dict["num_types"]
-                    pkt_nt = self._pocket_atom_dict["num_types"]
-                    if self.config.model.mol_atom_types < mol_nt:
-                        self.config.model.mol_atom_types = mol_nt
-                    if self.config.model.pocket_atom_types < pkt_nt:
-                        self.config.model.pocket_atom_types = pkt_nt
-                    self.logger.log(f"Atom dicts loaded for inference (mol={mol_nt}, pocket={pkt_nt})")
-                else:
-                    self._mol_atom_dict = None
-                    self._pocket_atom_dict = None
-            else:
-                self._mol_atom_dict = None
-                self._pocket_atom_dict = None
+            # Atom dicts are loaded early in __init__ — no action needed here.
 
-        self.model.load_state_dict(ckpt["model_state_dict"], strict=False)
-        self.logger.log(f"Loaded checkpoint: {path} (epoch {ckpt['epoch']})")
+        # 兼容 unicore 格式（key="model"）和 odyssey 格式（key="model_state_dict"）
+        if "model_state_dict" in ckpt:
+            state_dict = ckpt["model_state_dict"]
+            epoch = ckpt.get("epoch", "?")
+        else:
+            state_dict = ckpt.get("model", ckpt)
+            epoch = ckpt.get("extra_state", {}).get("train_iterator", {}).get("epoch", "?")
+
+        # 自动从 state_dict 检测架构并重建模型
+        sd_keys = list(state_dict.keys())
+        emb_key = next((k for k in sd_keys if "mol_model.embed_tokens.weight" == k), None)
+        if emb_key:
+            vocab, dim = state_dict[emb_key].shape
+            ffn_key = next((k for k in sd_keys if "mol_model.encoder.layers.0.fc1.weight" == k), None)
+            ffn_dim = state_dict[ffn_key].shape[0] if ffn_key else dim * 4
+            n_layers = max(
+                int(k.split(".layers.")[1].split(".")[0])
+                for k in sd_keys if "mol_model.encoder.layers." in k
+            ) + 1
+            # 从 gbf_proj.linear2 推断 attention heads 数
+            gbf_proj_key = next((k for k in sd_keys if "mol_model.gbf_proj.linear2.weight" == k), None)
+            n_heads = state_dict[gbf_proj_key].shape[0] if gbf_proj_key else dim // 8
+            # pocket vocab 单独检测
+            pkt_emb_key = next((k for k in sd_keys if "pocket_model.embed_tokens.weight" == k), None)
+            pkt_vocab = state_dict[pkt_emb_key].shape[0] if pkt_emb_key else vocab
+            # pocket gbf_k 单独检测
+            pkt_gbf_key = next((k for k in sd_keys if "pocket_model.gbf.mul.weight" == k), None)
+            pkt_gbf_k = state_dict[pkt_gbf_key].shape[0] if pkt_gbf_key else self.config.model.gbf_k
+
+            self.logger.log(
+                f"Auto-adapting arch: mol(dim={dim},ffn={ffn_dim},layers={n_layers},"
+                f"heads={n_heads},vocab={vocab}) pocket(vocab={pkt_vocab},gbf_k={pkt_gbf_k})"
+            )
+            for enc in [self.config.model.mol, self.config.model.pocket]:
+                enc.encoder_embed_dim = dim
+                enc.encoder_ffn_embed_dim = ffn_dim
+                enc.encoder_layers = n_layers
+                enc.encoder_attention_heads = n_heads
+            self.config.model.mol_atom_types = vocab
+            self.config.model.pocket_atom_types = pkt_vocab
+            self.config.model.gbf_k = pkt_gbf_k
+            del self.model
+            from .model import DrugCLIP
+            self.model = DrugCLIP(self.config.model).to(self.device)
+
+        # 过滤 shape 不匹配的 key（strict=False 不处理 size mismatch）
+        current_sd = self.model.state_dict()
+        filtered = {k: v for k, v in state_dict.items()
+                    if k in current_sd and current_sd[k].shape == v.shape}
+        skipped = [k for k in state_dict if k not in filtered]
+        if skipped:
+            self.logger.log(f"Skipped {len(skipped)} mismatched keys: {skipped[:5]}{'...' if len(skipped)>5 else ''}")
+        self.model.load_state_dict(filtered, strict=False)
+        self.logger.log(f"Loaded checkpoint: {path} (epoch {epoch})")
 
     def run_all_tasks(self) -> str:
         manifest_path = Path(self.config.data.benchmark_dir) / "manifest.jsonl"
@@ -431,14 +512,19 @@ class InferenceEngine:
             )
 
         # Step 3: build collated batches
+        _bos = self._mol_atom_dict["bos_idx"] if self._mol_atom_dict else 21  # [BOS] fallback
+        _eos = self._mol_atom_dict["eos_idx"] if self._mol_atom_dict else 22  # [EOS] fallback
+        _pad = self._mol_atom_dict["pad_idx"] if self._mol_atom_dict else 20  # [PAD] fallback
+
         batches = []
         current_batch = []
         for smi in smiles_list:
             mol_entry = self._mol_cache[smi]
             if mol_entry is None:
-                mol_tokens = torch.tensor([0, 20, 21, 22], dtype=torch.long)
-                mol_dist = torch.zeros(4, 4)
-                mol_et = torch.zeros(4, 4, dtype=torch.long)
+                # Dummy 2-token molecule [BOS, EOS] for failed conformer generation
+                mol_tokens = torch.tensor([_bos, _eos], dtype=torch.long)
+                mol_dist = torch.zeros(2, 2)
+                mol_et = torch.zeros(2, 2, dtype=torch.long)
             else:
                 mol_tokens = mol_entry["mol_tokens"]
                 mol_dist = mol_entry["mol_distances"]
@@ -449,10 +535,10 @@ class InferenceEngine:
                 "mol_edge_types": mol_et,
             })
             if len(current_batch) >= batch_size:
-                batches.append(collate_mol_fn(current_batch))
+                batches.append(collate_mol_fn(current_batch, pad_idx=_pad))
                 current_batch = []
         if current_batch:
-            batches.append(collate_mol_fn(current_batch))
+            batches.append(collate_mol_fn(current_batch, pad_idx=_pad))
 
         return batches
 
