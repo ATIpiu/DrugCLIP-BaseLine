@@ -73,8 +73,7 @@ conda create -n drugclip python=3.11 -y
 conda activate drugclip
 
 pip install -r requirements.txt
-
-
+```
 
 验证：
 
@@ -88,29 +87,72 @@ python -c "import torch; print(f'PyTorch {torch.__version__}, CUDA: {torch.cuda.
 
 ### PDBbind 训练数据
 
+本项目使用 **THU-ATOM PDBbind**（2808 个蛋白-配体复合物，含 ESMFold 对齐结构），已上传至 ModelScope：
+
 ```
-data/pbpp-2020/
+data/THU-ATOM_PDBbind/
 ├── 187l/
-│   ├── 187l_pocket.pdb       # 蛋白质口袋
-│   ├── 187l_ligand.sdf       # 配体 SDF（或 mol2）
-│   └── 187l_ligand.mol2
-└── ...
+│   ├── 187l_ligand.sdf                          # 配体 SDF
+│   ├── 187l_ligand.mol2                         # 配体 MOL2
+│   ├── 187l_protein_processed_fix.pdb           # 蛋白全结构（用于口袋提取）
+│   └── 187l_protein_esmfold_aligned_tr_fix.pdb  # ESMFold 对齐结构
+└── ...（共 2808 个复合物）
 ```
 
-下载：[PDBbind-2020 on HuggingFace](https://huggingface.co/datasets/photonmz/pdbbindpp-2020/tree/main)
+**ModelScope 下载（数据集因超 1.6GB 限制分为两个仓库，需合并）：**
 
 ```powershell
-cd data
-hf download THU-ATOM/PDBbind --repo-type dataset --local-dir .\THU-ATOM_PDBbind
+conda activate drugclip
+
+# Part 1（前 1370 个复合物）
+modelscope download ATIpiu/THU-ATOM_PDBbind_For_AI4S --repo-type dataset --local-dir data/THU-ATOM_PDBbind
+
+# Part 2（后 1369 个复合物）—— 下载到同一目录自动合并
+modelscope download ATIpiu/THU-ATOM_PDBbind_For_AI4S_2 --repo-type dataset --local-dir data/THU-ATOM_PDBbind
 ```
+
+或 Python SDK：
+
+```python
+from modelscope import snapshot_download
+snapshot_download('ATIpiu/THU-ATOM_PDBbind_For_AI4S',   repo_type='dataset', local_dir='data/THU-ATOM_PDBbind')
+snapshot_download('ATIpiu/THU-ATOM_PDBbind_For_AI4S_2', repo_type='dataset', local_dir='data/THU-ATOM_PDBbind')
+```
+
+数据集页面：
+- Part 1：https://www.modelscope.cn/datasets/ATIpiu/THU-ATOM_PDBbind_For_AI4S
+- Part 2：https://www.modelscope.cn/datasets/ATIpiu/THU-ATOM_PDBbind_For_AI4S_2
 
 ### 预训练模型
 
-下载原始 DrugCLIP checkpoint（unicore 格式，15层/512维/64头）：
+原始 DrugCLIP checkpoint（unicore 格式，15层/512维/64头），已上传至 ModelScope：
 
-https://drive.google.com/drive/folders/1zW1MGpgunynFxTKXC2Q4RgWxZmg6CInV
+**ModelScope 下载（推荐）：**
 
-放置到 `train/model/Base/checkpoint_best.pt`。
+```powershell
+# 方式一：CLI（单文件，约 1.1 GB）
+conda activate drugclip
+modelscope login --token YOUR_TOKEN
+modelscope download ATIpiu/DrugCLIP-Base checkpoint_best.pt --local-dir train/model/Base
+
+# 方式二：Python SDK
+conda activate drugclip
+python -c "
+from modelscope.hub.api import HubApi
+api = HubApi()
+api.login('YOUR_TOKEN')
+from modelscope import snapshot_download
+snapshot_download('ATIpiu/DrugCLIP-Base', local_dir='train/model/Base')
+"
+
+# 方式三：Git LFS
+git lfs install
+git clone https://www.modelscope.cn/ATIpiu/DrugCLIP-Base.git train/model/Base
+```
+
+模型页面：https://www.modelscope.cn/models/ATIpiu/DrugCLIP-Base
+
+下载后确认文件位于 `train/model/Base/checkpoint_best.pt`。
 
 ### Benchmark 数据
 
@@ -148,7 +190,7 @@ python -m train.run --mode train \
     --freeze-encoder-layers 0,1,2,3,4,5,6,7,8,9,10,11 \
     --freeze-embeddings --freeze-gbf \
     --new-lr 1e-4 \
-    --train-data data/pbpp-2020 \
+    --train-data data/THU-ATOM_PDBbind \
     --epochs 20 --batch-size 32
 ```
 
@@ -167,7 +209,7 @@ python -m train.run --mode full \
     --freeze-encoder-layers 0,1,2,3,4,5,6,7,8,9,10,11 \
     --freeze-embeddings --freeze-gbf \
     --new-lr 1e-4 \
-    --train-data data/pbpp-2020 \
+    --train-data data/THU-ATOM_PDBbind \
     --benchmark-dir data/benchmark/benchmark \
     --epochs 20 --batch-size 32
 ```
@@ -182,10 +224,34 @@ python -m train.run --mode inference \
 
 推理引擎自动从 `config.json` 读取完整模型架构和 atom 字典配置。
 
+### 推理加速：预缓存分子库（强烈推荐）
+
+benchmark 共有 **2,092,260 条**配体记录，每次推理都实时跑 RDKit 3D 构象生成耗时极长。
+提供独立脚本一次性将全部 SMILES 的 tokenization 结果存入 SQLite，后续推理直接加载，**与 checkpoint 无关**：
+
+```powershell
+# 首次运行（约 3~6 小时，取决于 CPU 核心数）
+conda activate drugclip
+python scripts/build_mol_cache.py --workers 4
+
+# 中断后续跑：自动跳过已缓存条目
+python scripts/build_mol_cache.py --workers 4
+```
+
+缓存层级说明：
+
+| 层级 | 内容 | 位置 | 生命周期 |
+|------|------|------|----------|
+| Level-1 Token 缓存 | SMILES → tokens / distances / edge_types | `output/mol_cache/tokens.db` | 永久，与 checkpoint 无关 |
+| Level-2 Embedding 缓存 | SMILES → 嵌入向量 | `output/mol_cache/emb/{ckpt_hash}/{task_id}.pkl` | 按 checkpoint 隔离 |
+
+推理时的命中顺序：**Level-2（跳过 RDKit + 模型前向）→ Level-1（跳过 RDKit）→ 实时 RDKit 计算**。
+缓存全部命中后，单任务推理从数分钟降至数秒。
+
 ### Agent 自主优化
 
 ```powershell
-python -m train.run --mode agent --train-data data/pbpp-2020
+python -m train.run --mode agent --train-data data/THU-ATOM_PDBbind
 ```
 
 Agent 支持微调模式调参：可自动调整冻结层数、学习率、batch size 等。
@@ -228,13 +294,13 @@ Agent 支持微调模式调参：可自动调整冻结层数、学习率、batch
 python -m train.run --mode train --pretrained train/model/Base/checkpoint_best.pt \
     --freeze-encoder-layers 0,1,2,3,4,5,6,7,8,9,10,11,12,13 \
     --freeze-embeddings --freeze-gbf --new-lr 1e-4 \
-    --train-data data/pbpp-2020 --max-samples 530 --epochs 5
+    --train-data data/THU-ATOM_PDBbind --max-samples 530 --epochs 5
 
 # 解冻后 3 层，全量数据，100 epoch
 python -m train.run --mode train --pretrained train/model/Base/checkpoint_best.pt \
     --freeze-encoder-layers 0,1,2,3,4,5,6,7,8,9,10,11 \
     --freeze-embeddings --freeze-gbf --new-lr 1e-4 \
-    --train-data data/pbpp-2020 --epochs 100 --batch-size 32
+    --train-data data/THU-ATOM_PDBbind --epochs 100 --batch-size 32
 ```
 
 ---
@@ -278,7 +344,7 @@ DrugCLIP/
 │   ├── run.py                 # 入口：--mode train|inference|full|agent
 │   ├── config.py              # 统一配置（EncoderConfig + ModelConfig + TrainConfig）
 │   ├── logger.py              # OdysseyLogger → output/result.log
-│   ├── inference.py           # Benchmark 推理引擎 → result.csv + result.zip
+│   ├── inference.py           # Benchmark 推理引擎（含两级磁盘缓存）→ result.csv + result.zip
 │   ├── model/
 │   │   ├── drugclip.py        # DrugCLIP + NonLinearHead projection
 │   │   ├── unimol_encoder.py  # UniMol Transformer (token + GBF + pair bias) + NonLinearHead
@@ -301,10 +367,17 @@ DrugCLIP/
 │   ├── tuning_agent.py        # LLM 驱动调参（支持微调模式）
 │   ├── model_agent.py         # 模型架构自动设计
 │   └── base_agent.py          # Agent 基类
+├── scripts/
+│   ├── build_mol_cache.py     # 预缓存全量 benchmark SMILES tokenization（与 ckpt 无关）
+│   ├── fill_random.py         # 填充随机分数（调试用）
+│   └── pack_submission.py     # 打包提交文件
 ├── output/
-│   └── models/drugclip/checkpoints/
+│   ├── models/drugclip/checkpoints/   # 训练输出的 checkpoint
+│   └── mol_cache/
+│       ├── tokens.db                  # Level-1：SMILES → tokenized data（SQLite）
+│       └── emb/{ckpt_hash}/           # Level-2：SMILES → 嵌入向量（per-task pkl）
 └── data/
-    ├── pbpp-2020/             # PDBbind 训练集
+    ├── THU-ATOM_PDBbind/      # PDBbind 训练集（2808 复合物，ModelScope 下载）
     ├── fasttest/              # 快速调试集
     └── benchmark/             # 117 任务评测集
 ```
@@ -316,7 +389,7 @@ DrugCLIP/
 ### Q：CUDA Out of Memory？
 
 ```powershell
-python -m train.run --mode train --batch-size 16 --train-data data/pbpp-2020
+python -m train.run --mode train --batch-size 16 --train-data data/THU-ATOM_PDBbind
 ```
 
 ### Q：Agent 模式 LLM 调用失败？
@@ -338,5 +411,22 @@ python -m train.run --mode train --batch-size 16 --train-data data/pbpp-2020
 python -m train.run --mode train --pretrained train/model/Base/checkpoint_best.pt \
     --freeze-encoder-layers 0,1,2,3,4,5,6,7,8,9,10,11,12,13 \
     --freeze-embeddings --freeze-gbf --new-lr 1e-4 \
-    --train-data data/pbpp-2020 --max-samples 530 --epochs 5
+    --train-data data/THU-ATOM_PDBbind --max-samples 530 --epochs 5
 ```
+
+### Q：推理太慢怎么办？
+
+先跑一次预缓存脚本（只需一次，之后永久生效）：
+
+```powershell
+python scripts/build_mol_cache.py --workers 4
+```
+
+缓存完成后，再次推理时：
+- **Level-1 命中**：跳过 RDKit 构象生成（最慢的 CPU 步骤）
+- **Level-2 命中**：额外跳过模型前向传播，单任务耗时从分钟级降至秒级
+
+### Q：换了新 checkpoint，Level-2 缓存还有效吗？
+
+Level-1（tokens.db）始终有效。Level-2 嵌入缓存按 checkpoint 文件大小 + 修改时间自动隔离，
+换 checkpoint 后首次推理会重新编码并建立新 checkpoint 的 Level-2 缓存。

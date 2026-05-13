@@ -20,6 +20,7 @@ from .utils import (
     smiles_list_to_fingerprints,
     # PDB/MOL2/SDF parsing
     parse_pdb_atoms,
+    extract_ligand_coords,
     extract_pocket_atoms,
     parse_mol2_coords,
     sdf_to_smiles,

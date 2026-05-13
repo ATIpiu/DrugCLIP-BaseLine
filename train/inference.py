@@ -5,10 +5,13 @@ Processes all benchmark tasks and generates result.csv with scores.
 
 import csv
 import gc
+import hashlib
 import os
+import pickle
+import sqlite3
 import time
 from pathlib import Path
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 
 import numpy as np
 import torch
@@ -49,13 +52,119 @@ class InferenceEngine:
         self.model = DrugCLIP(config.model).to(self.device)
         self.model.eval()
 
-        # SMILES → mol_data cache: each ligand prepared once, reused across tasks
+        # Level-1 in-memory cache: SMILES → mol tensor data (populated from disk cache)
         self._mol_cache: dict = {}
+        self._mol_atom_dict = None
+        self._pocket_atom_dict = None
+
+        # Persistent caches
+        cache_dir = Path(config.data.output_dir) / "mol_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        # Level-1 disk cache (checkpoint-independent): SQLite DB
+        # Maps smiles_md5 → pickled {mol_tokens, mol_distances, mol_edge_types} numpy arrays
+        self._token_db = self._open_token_db(cache_dir / "tokens.db")
+        self._token_pending: int = 0  # uncommitted inserts, flushed every batch
+
+        # Level-2 disk cache (checkpoint-dependent): per-task pickle files
+        # Maps smiles_md5 → embedding vector (numpy float32)
+        self._ckpt_tag = self._compute_ckpt_tag(checkpoint_path)
+        self._emb_cache_dir = cache_dir / "emb" / self._ckpt_tag
+        self._emb_cache_dir.mkdir(parents=True, exist_ok=True)
 
         if checkpoint_path:
             self._load_checkpoint(checkpoint_path)
         else:
             self.logger.log("Warning: No checkpoint loaded — using random weights")
+
+    # ── Persistent cache helpers ──────────────────────────────────────
+
+    @staticmethod
+    def _open_token_db(db_path: Path) -> sqlite3.Connection:
+        conn = sqlite3.connect(str(db_path))
+        conn.execute("PRAGMA journal_mode=WAL")    # concurrent reads while writing
+        conn.execute("PRAGMA synchronous=NORMAL")  # faster writes, safe enough
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS mol_tokens (
+                smiles_hash TEXT PRIMARY KEY,
+                data        BLOB NOT NULL
+            )
+        """)
+        conn.commit()
+        return conn
+
+    @staticmethod
+    def _compute_ckpt_tag(ckpt_path: Optional[str]) -> str:
+        if not ckpt_path:
+            return "no_ckpt"
+        p = Path(ckpt_path)
+        if not p.exists():
+            return hashlib.md5(ckpt_path.encode()).hexdigest()[:8]
+        stat = p.stat()
+        sig = f"{ckpt_path}|{stat.st_mtime}|{stat.st_size}"
+        return hashlib.md5(sig.encode()).hexdigest()[:8]
+
+    @staticmethod
+    def _smiles_key(smiles: str) -> str:
+        return hashlib.md5(smiles.encode()).hexdigest()
+
+    def _token_cache_get(self, smiles: str) -> Optional[dict]:
+        key = self._smiles_key(smiles)
+        row = self._token_db.execute(
+            "SELECT data FROM mol_tokens WHERE smiles_hash = ?", (key,)
+        ).fetchone()
+        if row is None:
+            return None
+        arr = pickle.loads(row[0])
+        return {
+            "mol_tokens":    torch.from_numpy(arr["t"]),
+            "mol_distances": torch.from_numpy(arr["d"]),
+            "mol_edge_types":torch.from_numpy(arr["e"]),
+        }
+
+    def _token_cache_put(self, smiles: str, mol_entry: dict):
+        """Store mol tensor data to SQLite. mol_entry has torch Tensor values."""
+        key = self._smiles_key(smiles)
+        blob = pickle.dumps({
+            "t": mol_entry["mol_tokens"].numpy(),
+            "d": mol_entry["mol_distances"].numpy(),
+            "e": mol_entry["mol_edge_types"].numpy(),
+        }, protocol=4)
+        self._token_db.execute(
+            "INSERT OR IGNORE INTO mol_tokens (smiles_hash, data) VALUES (?, ?)",
+            (key, blob)
+        )
+        self._token_pending += 1
+        if self._token_pending >= 200:
+            self._token_db.commit()
+            self._token_pending = 0
+
+    def _token_cache_flush(self):
+        if self._token_pending > 0:
+            self._token_db.commit()
+            self._token_pending = 0
+
+    def _load_emb_cache(self, task_id: str) -> Dict[str, np.ndarray]:
+        path = self._emb_cache_dir / f"{task_id}.pkl"
+        if path.exists():
+            try:
+                with open(path, "rb") as f:
+                    return pickle.load(f)
+            except Exception:
+                return {}
+        return {}
+
+    def _save_emb_cache(self, task_id: str, emb_dict: Dict[str, np.ndarray]):
+        path = self._emb_cache_dir / f"{task_id}.pkl"
+        with open(path, "wb") as f:
+            pickle.dump(emb_dict, f, protocol=4)
+
+    def __del__(self):
+        try:
+            self._token_cache_flush()
+            self._token_db.close()
+        except Exception:
+            pass
 
     def _load_checkpoint(self, path: str):
         ckpt = torch.load(path, map_location=self.device, weights_only=False)
@@ -147,12 +256,13 @@ class InferenceEngine:
             # Incremental save every task: crash-safe, never lose results
             self._write_result_csv(results)
 
-            # Free system RAM: clear SMILES cache + GC every 10 tasks
+            # Free system RAM: clear in-memory token cache every 10 tasks.
+            # Disk cache (SQLite + emb pkl) is NOT cleared — next task reloads from disk.
             if (i + 1) % 10 == 0:
                 self._mol_cache.clear()
                 gc.collect()
-                self.logger.log(f"Progress: {i+1}/{len(tasks)} tasks done (cache cleared)")
-            elif (i + 1) % 20 == 0:
+                self.logger.log(f"Progress: {i+1}/{len(tasks)} tasks done (mem cache cleared)")
+            elif (i + 1) % 5 == 0:
                 self.logger.log(f"Progress: {i+1}/{len(tasks)} tasks done")
 
         total_time = time.time() - t0
@@ -165,6 +275,7 @@ class InferenceEngine:
     def _score_single_task(
         self, task_dir: Path, task_info: dict
     ) -> List[Tuple[str, float]]:
+        task_id = task_info["task_id"]
         receptors = load_task_receptors(str(task_dir), task_info)
         ref_coords = load_reference_coords(str(task_dir), task_info)
         if not receptors:
@@ -177,23 +288,67 @@ class InferenceEngine:
         ligand_ids = list(ligand_ids)
         smiles_list = list(smiles_list)
 
-        # Prepare all ligands as UniMol batches
         pocket_radius = self.config.model.pocket.pocket_radius
-        mol_batches = self._prepare_ligand_batches(smiles_list)
 
+        # ── Level-2 embedding cache lookup ───────────────────────────
+        emb_cache = self._load_emb_cache(task_id)
+        keys = [self._smiles_key(s) for s in smiles_list]
+
+        cached_mask = np.array([k in emb_cache for k in keys], dtype=bool)
+        n_cached = cached_mask.sum()
+        n_total = len(smiles_list)
+
+        if n_cached == n_total:
+            # All embeddings cached → skip RDKit and model forward pass entirely
+            self.logger.log(f"  [emb cache] {n_total}/{n_total} ligands fully cached")
+            mol_embs_np = np.stack([emb_cache[k] for k in keys], axis=0)
+            mol_embs = torch.from_numpy(mol_embs_np).to(self.device)
+        else:
+            # Need to encode at least some ligands
+            if n_cached > 0:
+                self.logger.log(
+                    f"  [emb cache] {n_cached}/{n_total} hits, encoding {n_total - n_cached} new"
+                )
+
+            # Prepare only uncached ligands via token pipeline
+            uncached_indices = [i for i, hit in enumerate(cached_mask) if not hit]
+            uncached_smiles = [smiles_list[i] for i in uncached_indices]
+
+            mol_batches = self._prepare_ligand_batches(uncached_smiles)
+
+            with torch.no_grad():
+                with autocast(device_type="cuda", enabled=self.config.train.mixed_precision):
+                    new_emb_parts = []
+                    for batch in mol_batches:
+                        batch = {k: v.to(self.device) for k, v in batch.items()}
+                        emb = self.model.encode_mol(
+                            batch["mol_tokens"], batch["mol_distances"], batch["mol_edge_types"]
+                        )
+                        new_emb_parts.append(emb.cpu().numpy())
+            new_embs_np = np.concatenate(new_emb_parts, axis=0)  # (n_uncached, D)
+
+            # Write new embeddings into cache dict
+            for i, smi_idx in enumerate(uncached_indices):
+                emb_cache[keys[smi_idx]] = new_embs_np[i]
+
+            # Save updated embedding cache to disk
+            self._save_emb_cache(task_id, emb_cache)
+
+            # Assemble full mol_embs in original order
+            mol_embs_np = np.empty((n_total, new_embs_np.shape[1]), dtype=np.float32)
+            new_ptr = 0
+            for i, k in enumerate(keys):
+                if cached_mask[i]:
+                    mol_embs_np[i] = emb_cache[k]
+                else:
+                    mol_embs_np[i] = new_embs_np[new_ptr]
+                    new_ptr += 1
+
+            mol_embs = torch.from_numpy(mol_embs_np).to(self.device)
+
+        # ── Pocket encoding & scoring ─────────────────────────────────
         with torch.no_grad():
             with autocast(device_type="cuda", enabled=self.config.train.mixed_precision):
-                # Encode all ligands
-                mol_embs = []
-                for batch in mol_batches:
-                    batch = {k: v.to(self.device) for k, v in batch.items()}
-                    emb = self.model.encode_mol(
-                        batch["mol_tokens"], batch["mol_distances"], batch["mol_edge_types"]
-                    )
-                    mol_embs.append(emb)
-                mol_embs = torch.cat(mol_embs, dim=0)  # (N_ligands, D)
-
-                # Encode each receptor pocket and score
                 all_scores = []
                 for rec_name, rec_coords, rec_elements in receptors:
                     pocket_coords, pocket_elements = extract_pocket_atoms(
@@ -225,37 +380,57 @@ class InferenceEngine:
     def _prepare_ligand_batches(
         self, smiles_list: List[str], batch_size: int = 512
     ) -> List[dict]:
-        """Prepare ligands in batches with multiprocessing + SMILES cache."""
+        """Prepare ligands in batches.
+
+        Hit order: in-memory cache → SQLite token DB → RDKit (slowest).
+        New RDKit results are written back to SQLite for future runs.
+        """
         from concurrent.futures import ProcessPoolExecutor, as_completed
 
-        # Separate: uncached need RDKit (slow), cached are instant
+        # Step 1: fill in-memory cache from SQLite for SMILES not yet seen this run
+        db_hits = 0
+        for smi in smiles_list:
+            if smi not in self._mol_cache:
+                entry = self._token_cache_get(smi)
+                if entry is not None:
+                    self._mol_cache[smi] = entry
+                    db_hits += 1
+
+        # Step 2: remaining SMILES need RDKit conformer generation
         uncached = [(i, smi) for i, smi in enumerate(smiles_list) if smi not in self._mol_cache]
         total = len(smiles_list)
-        cache_hits = total - len(uncached)
+        mem_hits = total - len(uncached) - db_hits
 
         if uncached:
-            n_workers = min(os.cpu_count() or 4, 8)
-            self.logger.log(f"  Preparing {len(uncached)} ligands ({n_workers} workers)...")
-            mol_atom_dict = self._mol_atom_dict  # capture for picklable partial
+            n_workers = min(os.cpu_count() or 2, 2)
+            self.logger.log(
+                f"  Preparing {len(uncached)} ligands via RDKit "
+                f"({n_workers} workers, mem={mem_hits} db={db_hits} new={len(uncached)})..."
+            )
+            mol_atom_dict = self._mol_atom_dict
             _mol_fn = _partial(prepare_molecule, fast=True, atom_dict=mol_atom_dict)
             with ProcessPoolExecutor(max_workers=n_workers) as pool:
-                futures = {pool.submit(_mol_fn, smi): (idx, smi)
-                           for idx, smi in uncached}
+                futures = {pool.submit(_mol_fn, smi): (idx, smi) for idx, smi in uncached}
                 for f in as_completed(futures):
                     idx, smi = futures[f]
                     mol_data = f.result()
                     if mol_data is None:
                         self._mol_cache[smi] = None
                     else:
-                        self._mol_cache[smi] = {
-                            "mol_tokens": torch.from_numpy(mol_data["tokens"]),
+                        entry = {
+                            "mol_tokens":    torch.from_numpy(mol_data["tokens"]),
                             "mol_distances": torch.from_numpy(mol_data["distances"]),
-                            "mol_edge_types": torch.from_numpy(mol_data["edge_types"]),
+                            "mol_edge_types":torch.from_numpy(mol_data["edge_types"]),
                         }
-        elif cache_hits > 0:
-            self.logger.log(f"  [cache] all {total} ligands from SMILES cache")
+                        self._mol_cache[smi] = entry
+                        self._token_cache_put(smi, entry)  # persist to SQLite
+            self._token_cache_flush()
+        else:
+            self.logger.log(
+                f"  [cache] {total} ligands (mem={mem_hits} db={db_hits})"
+            )
 
-        # Build batches from (now fully populated) cache
+        # Step 3: build collated batches
         batches = []
         current_batch = []
         for smi in smiles_list:

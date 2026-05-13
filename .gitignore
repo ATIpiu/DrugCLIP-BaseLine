@@ -34,7 +34,7 @@ output/
 
 # Data files — keep directory structure, ignore large files
 data/pbpp-2020/*/
-data/fasttest/*/
+data/THU-ATOM_PDBbind/*/
 data/benchmark/benchmark/tasks/
 data/benchmark/benchmark/manifest.jsonl
 data/*.zip

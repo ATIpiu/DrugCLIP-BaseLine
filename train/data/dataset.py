@@ -17,6 +17,8 @@ from .utils import (
     parse_pdb_atoms,
     sdf_to_smiles,
     mol2_to_smiles,
+    extract_ligand_coords,
+    extract_pocket_atoms,
     prepare_molecule,
     prepare_pocket,
     NUM_ATOM_TYPES,
@@ -87,20 +89,29 @@ class CachedPDBbindDataset(Dataset):
 
         if not _SILENT():
             print(f"  Loading {total} samples ({self.split})...", flush=True)
-        for i, (pocket_pdb, smiles, pdb_id) in enumerate(file_list):
+        for i, (pocket_path, lig_path, smiles, pdb_id, needs_extract) in enumerate(file_list):
             mol_result = prepare_molecule(smiles, atom_dict=mol_atom_dict)
             if mol_result is None:
                 continue
 
-            coords, elements, _ = parse_pdb_atoms(pocket_pdb)
-            if len(coords) == 0:
+            if needs_extract:
+                # THU-ATOM: extract pocket from full protein using ligand coords
+                prot_coords, prot_elements, _ = parse_pdb_atoms(pocket_path)
+                lig_coords = extract_ligand_coords(lig_path)
+                pocket_coords, pocket_elements = extract_pocket_atoms(
+                    prot_coords, prot_elements, lig_coords)
+            else:
+                # PDBbind: pre-extracted pocket file
+                pocket_coords, pocket_elements, _ = parse_pdb_atoms(pocket_path)
+
+            if len(pocket_coords) == 0:
                 continue
-            pocket_result = prepare_pocket(coords, elements, max_pocket_atoms,
+            pocket_result = prepare_pocket(pocket_coords, pocket_elements, max_pocket_atoms,
                                            atom_dict=pocket_atom_dict)
 
             self._mol_data.append(mol_result)
             self._pocket_data.append(pocket_result)
-            valid_files.append((pocket_pdb, smiles, pdb_id))
+            valid_files.append((pocket_path, lig_path, smiles, pdb_id, needs_extract))
 
             if not _SILENT() and (i + 1) % report_every == 0:
                 pct = (i + 1) * 100 // total
@@ -111,27 +122,44 @@ class CachedPDBbindDataset(Dataset):
         self._file_list = valid_files
 
     def _scan_directories(self, dirs):
-        """Scan directory structure (noisy — RDKit stderr suppressed by caller)."""
+        """Scan directory structure (noisy — RDKit stderr suppressed by caller).
+
+        Returns list of tuples: (pocket_or_protein_path, ligand_sdf_path, smiles, pdb_id, needs_extract)
+        `needs_extract=True` means pocket must be cropped on-the-fly from the protein PDB
+        using ligand coords (THU-ATOM / official format).
+        """
         file_list = []
         for protein_dir in dirs:
             pdb_id = protein_dir.name
             pocket_pdb = protein_dir / f"{pdb_id}_pocket.pdb"
             ligand_sdf = protein_dir / f"{pdb_id}_ligand.sdf"
             ligand_mol2 = protein_dir / f"{pdb_id}_ligand.mol2"
+            protein_pdb = protein_dir / f"{pdb_id}_protein_processed_fix.pdb"
 
-            if not pocket_pdb.exists():
+            # Determine pocket source: pre-extracted or on-the-fly
+            if pocket_pdb.exists():
+                pocket_path = str(pocket_pdb)
+                needs_extract = False
+            elif protein_pdb.exists():
+                pocket_path = str(protein_pdb)
+                needs_extract = True
+            else:
                 continue
+
             smiles = ""
+            lig_path = ""
             if ligand_sdf.exists():
                 smiles = sdf_to_smiles(str(ligand_sdf))
+                lig_path = str(ligand_sdf)
             if not smiles and ligand_mol2.exists():
                 smiles = mol2_to_smiles(str(ligand_mol2))
+                lig_path = str(ligand_mol2)
             if not smiles:
                 continue
             mol = Chem.MolFromSmiles(smiles)
             if mol is None:
                 continue
-            file_list.append((str(pocket_pdb), smiles, pdb_id))
+            file_list.append((pocket_path, lig_path, smiles, pdb_id, needs_extract))
         return file_list
 
     def __len__(self) -> int:

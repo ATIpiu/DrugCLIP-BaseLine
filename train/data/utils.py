@@ -379,6 +379,27 @@ def parse_mol2_coords(mol2_path: str) -> np.ndarray:
     return np.array(coords, dtype=np.float32)
 
 
+# ── Ligand 3D coordinate extraction ───────────────────────────────
+
+def extract_ligand_coords(ligand_path: str) -> np.ndarray:
+    """Extract 3D coordinates from the first molecule in SDF or MOL2 file."""
+    if ligand_path.endswith('.sdf'):
+        supplier = Chem.SDMolSupplier(ligand_path, sanitize=False, removeHs=False)
+        for mol in supplier:
+            if mol is None:
+                continue
+            conf = mol.GetConformer()
+            return np.array(conf.GetPositions(), dtype=np.float32)
+        return np.zeros((0, 3), dtype=np.float32)
+    elif ligand_path.endswith('.mol2'):
+        mol = Chem.MolFromMol2File(ligand_path, sanitize=False, removeHs=False)
+        if mol is not None:
+            conf = mol.GetConformer()
+            return np.array(conf.GetPositions(), dtype=np.float32)
+        return np.zeros((0, 3), dtype=np.float32)
+    return np.zeros((0, 3), dtype=np.float32)
+
+
 # ── SDF / MOL2 → SMILES ──────────────────────────────────────────
 
 def sdf_to_smiles(sdf_path: str) -> str:
