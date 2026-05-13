@@ -295,7 +295,6 @@ class InferenceEngine:
             self.config.model.pocket_atom_types = pkt_vocab
             self.config.model.gbf_k = pkt_gbf_k
             del self.model
-            from .model import DrugCLIP
             self.model = DrugCLIP(self.config.model).to(self.device)
 
         # 过滤 shape 不匹配的 key（strict=False 不处理 size mismatch）
@@ -466,7 +465,7 @@ class InferenceEngine:
         Hit order: in-memory cache → SQLite token DB → RDKit (slowest).
         New RDKit results are written back to SQLite for future runs.
         """
-        from concurrent.futures import ProcessPoolExecutor, as_completed
+        from concurrent.futures import ThreadPoolExecutor as ProcessPoolExecutor, as_completed
 
         # Step 1: fill in-memory cache from SQLite for SMILES not yet seen this run
         db_hits = 0
