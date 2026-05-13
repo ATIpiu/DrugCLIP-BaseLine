@@ -99,29 +99,21 @@ data/THU-ATOM_PDBbind/
 └── ...（共 2808 个复合物）
 ```
 
-**ModelScope 下载（数据集因超 1.6GB 限制分为两个仓库，需合并）：**
+**ModelScope 下载：**
 
 ```powershell
 conda activate drugclip
-
-# Part 1（前 1370 个复合物）
 modelscope download ATIpiu/THU-ATOM_PDBbind_For_AI4S --repo-type dataset --local-dir data/THU-ATOM_PDBbind
-
-# Part 2（后 1369 个复合物）—— 下载到同一目录自动合并
-modelscope download ATIpiu/THU-ATOM_PDBbind_For_AI4S_2 --repo-type dataset --local-dir data/THU-ATOM_PDBbind
 ```
 
 或 Python SDK：
 
 ```python
 from modelscope import snapshot_download
-snapshot_download('ATIpiu/THU-ATOM_PDBbind_For_AI4S',   repo_type='dataset', local_dir='data/THU-ATOM_PDBbind')
-snapshot_download('ATIpiu/THU-ATOM_PDBbind_For_AI4S_2', repo_type='dataset', local_dir='data/THU-ATOM_PDBbind')
+snapshot_download('ATIpiu/THU-ATOM_PDBbind_For_AI4S', repo_type='dataset', local_dir='data/THU-ATOM_PDBbind')
 ```
 
-数据集页面：
-- Part 1：https://www.modelscope.cn/datasets/ATIpiu/THU-ATOM_PDBbind_For_AI4S
-- Part 2：https://www.modelscope.cn/datasets/ATIpiu/THU-ATOM_PDBbind_For_AI4S_2
+数据集页面：https://www.modelscope.cn/datasets/ATIpiu/THU-ATOM_PDBbind_For_AI4S
 
 ### 预训练模型
 
