@@ -107,8 +107,7 @@ data/THU-ATOM_PDBbind/
 ```powershell
 conda activate drugclip
 modelscope download ATIpiu/THU-ATOM_PDBbind_For_AI4S THU-ATOM_PDBbind.zip --repo-type dataset --local_dir data/
-# 解压
-cd data && unzip THU-ATOM_PDBbind.zip && cd ..
+Expand-Archive -Path data\THU-ATOM_PDBbind.zip -DestinationPath data\ -Force
 ```
 
 或 Python SDK：
