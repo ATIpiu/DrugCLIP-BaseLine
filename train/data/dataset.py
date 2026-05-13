@@ -245,7 +245,11 @@ def _detect_dataset_type(data_dir: str) -> str:
         return "pdbbind"
     first = dirs[0]
     name = first.name
-    if (first / f"{name}_pocket.pdb").exists() or (first / f"{name}_protein.pdb").exists():
+    if (
+        (first / f"{name}_pocket.pdb").exists() or
+        (first / f"{name}_protein.pdb").exists() or
+        (first / f"{name}_protein_processed_fix.pdb").exists()
+    ):
         return "pdbbind"
     if (first / "actives.smi").exists():
         return "pocket_ligand"

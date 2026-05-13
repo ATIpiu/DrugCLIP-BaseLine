@@ -15,26 +15,34 @@ class DataAgent(BaseAgent):
         if not data_dir.exists():
             return {"status": "error", "data": {}, "summary": f"Data directory not found: {data_dir}"}
 
-        # Quick format check — probe a known PDBbind dir (10gs is common)
-        known_name = "10gs"
-        known_dir = data_dir / known_name
-        if known_dir.is_dir() and \
-           (known_dir / f"{known_name}_pocket.pdb").exists() and \
-           ((known_dir / f"{known_name}_ligand.sdf").exists() or
-            (known_dir / f"{known_name}_ligand.mol2").exists()):
+        def _is_valid_sample(d: Path) -> bool:
+            name = d.name
+            has_ligand = (d / f"{name}_ligand.sdf").exists() or (d / f"{name}_ligand.mol2").exists()
+            has_protein = (
+                (d / f"{name}_pocket.pdb").exists() or
+                (d / f"{name}_protein_processed_fix.pdb").exists() or
+                (d / f"{name}_protein.pdb").exists()
+            )
+            return has_ligand and has_protein
+
+        subdirs = [d for d in data_dir.iterdir() if d.is_dir()]
+        if not subdirs:
+            return {"status": "error", "data": {}, "summary": f"Data directory is empty: {data_dir}"}
+
+        valid = [d for d in subdirs if _is_valid_sample(d)]
+        total = len(subdirs)
+        n_valid = len(valid)
+
+        if n_valid == 0:
+            probe = subdirs[0]
+            files = [f.name for f in probe.iterdir()] if probe.exists() else []
             return {
-                "status": "ok",
-                "data": {"format": "pdbbind"},
-                "summary": f"Data OK: PDBbind format confirmed ({known_name})",
+                "status": "error", "data": {},
+                "summary": f"No valid samples found. Files in {probe.name}/: {files}",
             }
 
-        # Fallback: try any subdirectory
-        try:
-            probe = next(d for d in data_dir.iterdir() if d.is_dir())
-            name = probe.name
-            if (probe / f"{name}_pocket.pdb").exists():
-                return {"status": "ok", "data": {"format": "pdbbind"}, "summary": f"Data OK ({name})"}
-        except StopIteration:
-            pass
-
-        return {"status": "error", "data": {}, "summary": "Data not in PDBbind format"}
+        return {
+            "status": "ok",
+            "data": {"format": "pdbbind", "total": total, "valid": n_valid},
+            "summary": f"Data OK: {n_valid}/{total} valid samples in {data_dir}",
+        }
