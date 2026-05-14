@@ -177,6 +177,32 @@ class InferenceEngine:
             "mol_edge_types":torch.from_numpy(arr["e"]),
         }
 
+    def _token_cache_get_batch(self, smiles_list: List[str]) -> Dict[str, dict]:
+        """Batch-fetch token data in a single SQLite query (deduped, chunked at 900)."""
+        key_to_smi: Dict[str, str] = {}
+        for smi in smiles_list:
+            key_to_smi[self._smiles_key(smi)] = smi
+
+        found: Dict[str, dict] = {}
+        keys = list(key_to_smi.keys())
+        CHUNK = 900  # SQLite supports up to 999 bind variables per statement
+        for start in range(0, len(keys), CHUNK):
+            chunk = keys[start:start + CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            rows = self._token_db.execute(
+                f"SELECT smiles_hash, data FROM mol_tokens WHERE smiles_hash IN ({placeholders})",
+                chunk
+            ).fetchall()
+            for hash_key, blob in rows:
+                arr = pickle.loads(blob)
+                smi = key_to_smi[hash_key]
+                found[smi] = {
+                    "mol_tokens":    torch.from_numpy(arr["t"]),
+                    "mol_distances": torch.from_numpy(arr["d"]),
+                    "mol_edge_types":torch.from_numpy(arr["e"]),
+                }
+        return found
+
     def _token_cache_put(self, smiles: str, mol_entry: dict):
         """Store mol tensor data to SQLite. mol_entry has torch Tensor values."""
         key = self._smiles_key(smiles)
@@ -475,14 +501,14 @@ class InferenceEngine:
         """
         from concurrent.futures import ThreadPoolExecutor as ProcessPoolExecutor, as_completed
 
-        # Step 1: fill in-memory cache from SQLite for SMILES not yet seen this run
+        # Step 1: batch-fetch from SQLite for all SMILES not already in memory cache
+        need_db = [smi for smi in smiles_list if smi not in self._mol_cache]
         db_hits = 0
-        for smi in smiles_list:
-            if smi not in self._mol_cache:
-                entry = self._token_cache_get(smi)
-                if entry is not None:
-                    self._mol_cache[smi] = entry
-                    db_hits += 1
+        if need_db:
+            found = self._token_cache_get_batch(need_db)
+            for smi, entry in found.items():
+                self._mol_cache[smi] = entry
+                db_hits += 1
 
         # Step 2: remaining SMILES need RDKit conformer generation
         uncached = [(i, smi) for i, smi in enumerate(smiles_list) if smi not in self._mol_cache]
