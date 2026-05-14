@@ -298,6 +298,32 @@ python -m train.run --mode train --pretrained train/model/Base/checkpoint_best.p
 python -m train.run --mode full --pretrained train/model/Base/checkpoint_best.pt --freeze-encoder-layers 0,1,2,3,4,5,6,7,8,9,10,11 --freeze-embeddings --freeze-gbf --new-lr 1e-4 --train-data data/THU-ATOM_PDBbind --benchmark-dir data/benchmark/benchmark --epochs 20 --batch-size 32
 ```
 
+### 可选加速：后台下载预构建 Token 缓存
+
+> 训练期间（等待 GPU 跑完 epoch 时），可在后台下载已预构建的 **tokens.db**，
+> 直接跳过 3~6 小时的本地 RDKit 构象生成。
+
+benchmark 全量 2,092,260 条 SMILES 的 Level-1 Token 缓存（15 GB）已上传至 ModelScope：
+
+**Windows (PowerShell) — 后台下载**
+
+```powershell
+Start-Job { conda run -n drugclip modelscope download ATIpiu/DrugCLIP-Cache tokens.db --repo-type dataset --local_dir output/mol_cache/ }
+```
+
+**Linux / macOS — 后台下载**
+
+```bash
+conda activate drugclip && nohup modelscope download ATIpiu/DrugCLIP-Cache tokens.db --repo-type dataset --local_dir output/mol_cache/ > /tmp/cache_dl.log 2>&1 &
+echo "后台下载已启动，日志: /tmp/cache_dl.log"
+```
+
+下载完成后文件位于 `output/mol_cache/tokens.db`，推理时自动命中 Level-1 缓存，**无需任何额外配置**。
+
+缓存页面：https://www.modelscope.cn/datasets/ATIpiu/DrugCLIP-Cache
+
+---
+
 ### 仅推理（全量 benchmark，Windows / Linux 通用）
 
 ```bash
